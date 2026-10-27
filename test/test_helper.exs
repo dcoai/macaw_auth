@@ -32,4 +32,4 @@ Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
 # ci/tools/ldap image); they run when MACAW_AUTH_LDAP_HOST names it.
 exclude = if System.get_env("MACAW_AUTH_LDAP_HOST"), do: [], else: [:ldap]
 
-ExUnit.start(exclude: exclude)
+ExUnit.start(exclude: exclude, formatters: [ExUnit.CLIFormatter, Surfex.ExUnitFormatter])

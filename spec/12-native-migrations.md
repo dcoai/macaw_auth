@@ -1,6 +1,6 @@
 # 12 — Native: migrations {#auth-migrations}
 
-The native backend's tables live in the host's repo, and the host owns their migrations: `mix macaw_auth.gen.migration` writes them into the host's migrations directory, as plain DDL the host can read. **They are the ones this library's own tests run** (the test helper generates them and migrates a fresh SQLite database with them), so what ships is what is tested (macaw_compose#50).
+The native backend's tables live in the host's repo, and the host owns their migrations: `mix macaw_auth.gen.migration` (`Mix.Tasks.MacawAuth.Gen.Migration`) writes them into the host's migrations directory, as plain DDL the host can read. **They are the ones this library's own tests run** (the test helper generates them and migrates a fresh SQLite database with them), so what ships is what is tested (macaw_compose#50).
 
 ```sh
 mix macaw_auth.gen.migration

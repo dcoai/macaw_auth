@@ -42,6 +42,10 @@ Each redirect is `Phoenix.LiveView.redirect/2`, a full page load (status 302 on 
 :require_authenticated with no token halts with redirected {:redirect, %{to: "/login", status: 302}}
 ```
 
+```test:live-require-authenticated
+:require_authenticated with a live token continues with current_user and current_session assigned
+```
+
 ```test:live-require-role
 {:require_role, ["admin"]} for a viewer halts redirecting to "/"; for an admin it continues with current_user assigned
 ```

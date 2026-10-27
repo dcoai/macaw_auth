@@ -15,7 +15,7 @@ The `:ldap` tests run against macaw's OpenLDAP fixture directory (users under `c
 
 ## 1. Configuration {#auth-ldap-config}
 
-`Macaw.Auth.Native.Source.Ldap.Config.parse/2` (which `Macaw.Auth.Native.Source.Ldap.parse/2` is) validates a source's map and fills its defaults, refusing a bad one by the source's name and the key ([06 §1.1](06-native-sources.md#auth-source-settings)). The known keys are exactly those below, plus `type` and `name` (required).
+A source's configuration is `Macaw.Auth.Native.Source.Ldap.Config`'s: `Macaw.Auth.Native.Source.Ldap.Config.parse/2` (which `Macaw.Auth.Native.Source.Ldap.parse/2` is) validates a source's map and fills its defaults, refusing a bad one by the source's name and the key ([06 §1.1](06-native-sources.md#auth-source-settings)). The known keys are exactly those below, plus `type` and `name` (required).
 
 **Connection:**
 
@@ -279,7 +279,7 @@ through the chain, alice is provisioned with source "nas", no hash and ["admin"]
 
 `Macaw.Auth.Native.Source.Ldap.diagnose/3` (`source`, `username`, `password`) runs the sign-in flow without signing in and says how each step went: `[{step, :ok | :error, detail}]`, **ending at the first failure.** The steps, in order: `"connect"` (a TCP connect to host and port), `"TLS"` (the transport: `"LDAPS, certificate and hostname verified"`, `"StartTLS, …"`, `"certificate NOT verified (verify_peer: false)"`, or plain LDAP's warning that passwords go unencrypted), `"find the user's DN"` (direct bind's DN, or `"searched <base> for <filter> as <bind_dn>"` / `"anonymously"`, the filter shown with the username filter-escaped), `"bind as the user"`, `"read attributes"`, `"username"`, `"groups"`, `"required group"` and `"roles"`. A failed step's detail is its reason's explanation (§6). **An empty password** is the single step `{"password", :error, …}`. **The password is used for the bind and appears nowhere in the result.**
 
-`mix macaw_auth.ldap.check SOURCE USERNAME` prints it, a line a step (`ok     <step>: <detail>`, `FAILED <step>: <detail>`), and exits non-zero when a step failed:
+`mix macaw_auth.ldap.check SOURCE USERNAME` (`Mix.Tasks.MacawAuth.Ldap.Check`) prints it, a line a step (`ok     <step>: <detail>`, `FAILED <step>: <detail>`), and exits non-zero when a step failed:
 - **the password comes from `MACAW_AUTH_CHECK_PASSWORD`,** never the command line, where `ps` and shell history would show it; unset, the task stops: `"set MACAW_AUTH_CHECK_PASSWORD to the user's password (it is never read from argv)"`;
 - `SOURCE` is an LDAP source of the configured `sources`, by name; another name stops the task, naming the configured ones;
 - it reads the configuration as the backend does, a fault stopping it with the fault named, and starts `:ssl` and `:eldap` itself;

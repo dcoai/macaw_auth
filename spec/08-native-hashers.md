@@ -26,6 +26,10 @@ check(Bcrypt) is :ok; check(String) is {:error, "hasher: String is not a Macaw.A
 a module defining only hash/1 is {:error, "hasher: <module> is not a Macaw.Auth.Native.Hasher"}; the test suite's counting hasher, implementing every callback, is :ok
 ```
 
+```test:hasher-check-each-callback
+the behavior has five callbacks, and a module defining every one of them but one is refused, for each of the five
+```
+
 ## 2. The two algorithms {#auth-hasher-algorithms}
 
 - **`Macaw.Auth.Native.Hasher.Bcrypt`** (`bcrypt_elixir`): it owns hashes beginning `$2a$`, `$2b$` or `$2y$`. Its cost is bcrypt_elixir's own setting, `config :bcrypt_elixir, log_rounds:` (default 12); a hash at another cost (the two digits after the second `$`), or one it can't read, needs a rehash.

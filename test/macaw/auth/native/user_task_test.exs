@@ -53,6 +53,7 @@ defmodule Mix.Tasks.MacawAuth.UserTest do
   defp sign_in(username, password),
     do: Native.authenticate(%{username: username, password: password})
 
+  @tag verifies: "users-commands"
   test "add, list, roles, password, disable, enable and reset-second-factor" do
     assert {0, out, []} = task(["add", "Alice", "--role", "admin", "--role", "ops"], "first pw")
     assert json(out) == [%{"ok" => true, "added" => "alice", "roles" => ["admin", "ops"]}]
@@ -108,6 +109,7 @@ defmodule Mix.Tasks.MacawAuth.UserTest do
     assert row("alice").totp_enabled_at == nil
   end
 
+  @tag verifies: "users-password-argv"
   test "a password passed as an argument is refused, never echoed, and nothing changes" do
     local_user!("bob", "old pw")
 
@@ -136,6 +138,7 @@ defmodule Mix.Tasks.MacawAuth.UserTest do
     assert {:ok, _} = sign_in("bob", "old pw")
   end
 
+  @tag verifies: "users-password-env"
   test "add and password need the password in the environment variable" do
     local_user!("bob", "old pw")
 
@@ -149,6 +152,7 @@ defmodule Mix.Tasks.MacawAuth.UserTest do
     assert Repo.get_by(UserRecord, username: "carol") == nil
   end
 
+  @tag verifies: "users-task-errors"
   test "a user's error is one JSON line on stderr and exit status 1, never a stack trace" do
     local_user!("bob", "old pw")
     Repo.insert!(%UserRecord{username: "erin", source: "nas"})
@@ -166,5 +170,27 @@ defmodule Mix.Tasks.MacawAuth.UserTest do
       assert {1, [], [line]} = task(argv, "env pw")
       assert JSON.decode!(line) == %{"ok" => false, "error" => error}, inspect(argv)
     end
+  end
+
+  # The section's own text, beside the hints inside it.
+  @tag verifies: "auth-users-task"
+  test "the task reads MACAW_AUTH_USER_PASSWORD, answers on stdout, and revokes telling no page" do
+    record = local_user!("alice", "old pw")
+    {:ok, token, _} = Native.create_session(Native.to_user(record), [])
+    :ok = Macaw.Auth.subscribe(record.id)
+
+    assert {0, [line], []} = task(["password", "alice"], "new pw")
+    assert JSON.decode!(line) == %{"ok" => true, "password_set" => "alice"}
+    refute line =~ "new pw"
+    assert {:ok, _} = sign_in("alice", "new pw")
+
+    # Revoked, and the open page is not told: it leaves at its next re-check.
+    assert Native.fetch_session(token, []) == {:error, :invalid}
+    refute_receive {:sessions_revoked, _}, 50
+
+    {:ok, token, _} = Native.create_session(Native.to_user(row("alice")), [])
+    assert {0, _, []} = task(["reset-second-factor", "alice"])
+    assert Native.fetch_session(token, []) == {:error, :invalid}
+    refute_receive {:sessions_revoked, _}, 50
   end
 end

@@ -52,9 +52,15 @@ the code that confirmed an enrollment at t0 is refused at t0
 
 **Pending until confirmed.**
 - `Macaw.Auth.Native.enroll_begin/2` (`Macaw.Auth.Native.Totp.enroll_begin/2`) starts or resumes enrollment: `{:ok, %{secret, uri}}`, the secret and the `otpauth://` URI for the page's QR code, its label `<issuer>:<username>` and its `issuer` the configured `totp_issuer`. **A pending secret is kept,** so a reload shows the same code. The secret is stored sealed (§4), **with `totp_enabled_at` nil: a pending enrollment changes nothing at sign-in.** `{:error, :already_enrolled}` for an enrolled user, `{:error, :not_found}` for no such user. Two first loads at once keep one secret: the write is conditional on there being none, and the other caller is shown the one kept.
-- `Macaw.Auth.Native.enroll_confirm/3` confirms with a valid code (the window, §1), behind the throttle: **`{:ok, recovery_codes}`, ten codes shown once** and never retrievable again (§6), the second factor on (`totp_enabled_at` set) and the code's step recorded. `{:error, :invalid_code}` for a wrong code, `:not_started` without a pending enrollment, `:already_enrolled`, `:throttled`. The confirmation is conditional on the secret the code was checked against, so an enrollment restarted meanwhile (`admin_reset/2`, then `enroll_begin/2`) isn't confirmed by a code for the old secret (`:not_started`).
+- `Macaw.Auth.Native.enroll_confirm/3` (`Macaw.Auth.Native.Totp.enroll_confirm/3` behind the throttle) confirms with a valid code (the window, §1): **`{:ok, recovery_codes}`, ten codes shown once** and never retrievable again (§6), the second factor on (`totp_enabled_at` set) and the code's step recorded. `{:error, :invalid_code}` for a wrong code, `:not_started` without a pending enrollment, `:already_enrolled`, `:throttled`. The confirmation is conditional on the secret the code was checked against, so an enrollment restarted meanwhile (`admin_reset/2`, then `enroll_begin/2`) isn't confirmed by a code for the old secret (`:not_started`).
 
 The enrollment page, after a successful confirmation, completes a session's `:second_factor_enroll` step ([02 §7.2](02-plugs.md#auth-plug-complete-step)).
+
+The issuer is checked when the configuration is read ([05 §2](05-native-config.md#auth-native-config)): it prefixes the label, so a colon in it is a fault.
+
+```test:totp-issuer-setting
+Config.parse with totp_issuer "a:b" is {:error, "totp_issuer: …"}
+```
 
 ```test:totp-enroll
 enroll_begin gives a 20-byte secret and the same one again; the uri is "otpauth://totp/Test%20App:<user>?secret=<base32>&issuer=Test%20App"; the user is still :none; a code an hour off is :invalid_code; the right code gives ten codes and makes the user :enrolled; then begin and confirm are :already_enrolled
@@ -101,6 +107,10 @@ a value sealed for "user a" doesn't unseal under another key, nor for "user b", 
 alice's sealed secret copied onto bob's row raises SealingKeyError at bob's enroll_begin
 ```
 
+```test:seal-short-key-config
+Config.parse with sealing_key "too short a key" is {:error, "sealing_key: must be at least 32 bytes"} and with 42 "sealing_key: must be a binary…"; a parsed configuration's inspection shows neither the key nor "sealing_key"
+```
+
 ```test:seal-key-missing
 with no sealing_key, enroll_begin raises "sealing_key is not set"; with an MFA returning a short key, "sealing_key Macaw.Auth.Native.TotpTest.key/1 did not return"; with an MFA returning 44 bytes, enrollment begins
 ```
@@ -120,8 +130,8 @@ a recovery code passes an enrolled user's session's second factor through verify
 - **Ten codes,** each **ten characters of an alphabet without look-alikes** (`23456789ABCDEFGHJKLMNPQRSTUVWXYZ`: no 0, O, 1 or I), 32 symbols so a random byte's low five bits pick one without bias (50 bits a code). They are shown in two groups of five, `ABCDE-FGHJK`, and accepted in any case and spacing (§1).
 - **Stored only as SHA-256** of the normalized code, one row each in `macaw_auth_recovery_codes` (`Macaw.Auth.Native.RecoveryCodeRecord`), `(user_id, code_hash)` unique. The codes are random, so an unsalted hash is as strong as the code; a copy of the table spends nothing.
 - **A code is spent by deleting its row, conditionally** (`DELETE … WHERE user_id = ? AND code_hash = ?`): it either happens or doesn't, so two submissions of one code can't both find it. A table rather than a list in a column, which would need a read, a change and a compare-and-set write of the whole list.
-- `Macaw.Auth.Native.recovery_codes_left/1` counts the unspent ones (0 for an id that isn't a UUID).
-- `Macaw.Auth.Native.regenerate_recovery_codes/2` replaces an enrolled user's codes, in one transaction: `{:ok, codes}` (shown once; the old ones no longer work), or `{:error, :not_enrolled}`.
+- `Macaw.Auth.Native.recovery_codes_left/1` (`Macaw.Auth.Native.Totp.recovery_codes_left/1`) counts the unspent ones (0 for an id that isn't a UUID).
+- `Macaw.Auth.Native.regenerate_recovery_codes/2` (`Macaw.Auth.Native.Totp.regenerate_recovery_codes/2`) replaces an enrolled user's codes, in one transaction: `{:ok, codes}` (shown once; the old ones no longer work), or `{:error, :not_enrolled}`.
 
 ```test:recovery-codes
 enrollment gives ten distinct codes matching [2-9A-HJ-NP-Z]{5}-[2-9A-HJ-NP-Z]{5}, ten left; no stored value contains a code with or without its dash; the stored hashes are the SHA-256 of the codes without dashes
@@ -144,6 +154,12 @@ regenerating gives ten new codes, ten left; every old one is refused and a new o
 
 A `:required` user owes enrollment at sign-in (`:second_factor_enroll`, [01 §4](01-contract.md#auth-steps)); after confirming and completing the step, they are `:enrolled` and owe nothing more in that session.
 
+The setting is checked when the configuration is read ([05 §2](05-native-config.md#auth-native-config)): `false`, `true`, or a non-empty list of role names; anything else is a fault naming `totp_required`.
+
+```test:totp-policy-setting
+Config.parse with totp_required [] or "yes" is {:error, "totp_required: …"}
+```
+
 ```test:totp-policy-roles
 with totp_required ["admin"]: an admin not enrolled is :required and owes :second_factor_enroll, a viewer is :none and owes nothing; after enrolling and completing the step, the admin is :enrolled and owes nothing
 ```
@@ -154,8 +170,8 @@ with totp_required true, a new user is :required
 
 ## 8. Turning it off {#auth-totp-disable}
 
-- **The user** turns it off with `Macaw.Auth.Native.disable/3`, proving it with a current code or a recovery code (which is spent), behind the throttle: `:ok`, the sealed secret, enabled time, last step and recovery codes all deleted, in one transaction. **Refused with `{:error, :required}` while policy requires one** (an administrator's reset then); `{:error, :invalid_code}` for a wrong code or a user not enrolled.
-- **An administrator** clears it with `Macaw.Auth.Native.admin_reset/2` (a lost device), enrolled or pending, **and revokes every session of theirs** with reason `:second_factor_reset` (`Macaw.Auth.Native.Sessions.revoke_all/3`, [09 §5](09-native-sessions.md#auth-sessions-revoke)), so their open pages disconnect: they sign in again, and enroll again if policy requires. `:ok`, also for an id that isn't a UUID (nothing happens). With option `announce: false` the sessions are revoked without the push, for a process that is not the app's node; `mix macaw_auth.user reset-second-factor` and its release entry point run it so ([13 §1](13-native-users.md#auth-users-api)).
+- **The user** turns it off with `Macaw.Auth.Native.disable/3`, which puts `Macaw.Auth.Native.Totp.disable/3` behind the throttle, proving it with a current code or a recovery code (which is spent): `:ok`, the sealed secret, enabled time, last step and recovery codes all deleted, in one transaction. **Refused with `{:error, :required}` while policy requires one** (an administrator's reset then); `{:error, :invalid_code}` for a wrong code or a user not enrolled.
+- **An administrator** clears it with `Macaw.Auth.Native.admin_reset/2` (`Macaw.Auth.Native.Totp.admin_reset/2`; a lost device), enrolled or pending, **and revokes every session of theirs** with reason `:second_factor_reset` (`Macaw.Auth.Native.Sessions.revoke_all/3`, [09 §5](09-native-sessions.md#auth-sessions-revoke)), so their open pages disconnect: they sign in again, and enroll again if policy requires. `:ok`, also for an id that isn't a UUID (nothing happens). With option `announce: false` the sessions are revoked without the push, for a process that is not the app's node; `mix macaw_auth.user reset-second-factor` and its release entry point run it so ([13 §1](13-native-users.md#auth-users-api)).
 
 ```test:totp-disable
 "abcdef" doesn't disable; a current code does: the user is :none, the sealed secret nil, no recovery codes left; an admin under totp_required ["admin"] gets {:error, :required}

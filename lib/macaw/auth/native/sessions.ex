@@ -293,13 +293,16 @@ defmodule Macaw.Auth.Native.Sessions do
   end
 
   # A row deleted between the read and this write is stale: with
-  # `stale_error_field` that is an error value, not a raise.
+  # `stale_error_field` that is an error value, not a raise. `updated_at` is
+  # forced: a `now` equal to the row's own would otherwise be no change, and
+  # Ecto would stamp the system clock in its place, ignoring `:now`.
   defp add_step(repo, %SessionRecord{completed_steps: done} = record, name, opts) do
     if name in done do
       :ok
     else
       record
-      |> Ecto.Changeset.change(completed_steps: done ++ [name], updated_at: now(opts))
+      |> Ecto.Changeset.change(completed_steps: done ++ [name])
+      |> Ecto.Changeset.force_change(:updated_at, now(opts))
       |> repo.update(stale_error_field: :id)
       |> case do
         {:ok, _record} -> :ok

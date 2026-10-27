@@ -37,6 +37,8 @@ defmodule Spelling do
   @exempt_paths [
     ~r{^deps/},
     ~r{^_build/},
+    # surfex's relation log: machine-written, append-only, in surfex's own vocabulary
+    ~r{^\.surfex/},
     ~r{\.(ttf|woff2?|png|ico|jpg|gif|db)$},
     ~r{^ci/spelling\.exs$},
     ~r{^test/ci/spelling_test\.exs$}

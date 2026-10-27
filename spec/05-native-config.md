@@ -61,6 +61,10 @@ Every attempt emits `[:macaw_auth, :native, :authenticate]` with `%{count: 1}` a
 a wrong password at the directory "nas" emits %{result: :error, reason: :invalid_credentials, source: "nas"}, whose inspection doesn't contain the password; a success emits %{result: :ok, source: "nas", user_id: id}
 ```
 
+```test:native-telemetry-throttled
+a throttled attempt emits %{count: 1} with %{result: :error, reason: :throttled, user_id: nil}
+```
+
 ## 2. The configuration {#auth-native-config}
 
 `Macaw.Auth.Native.Config` is the backend's configuration, `config :macaw_auth, Macaw.Auth.Native, …`, parsed once into a struct with **every fault named** (exio's `AuthConfig` approach):

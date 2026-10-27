@@ -48,7 +48,9 @@ defmodule Macaw.Auth.MixProject do
       {:phoenix_live_view, "~> 1.0"},
       {:phoenix_pubsub, "~> 2.1"},
       {:ecto_sqlite3, "~> 0.17", only: :test},
-      {:stream_data, "~> 1.1", only: :test}
+      {:stream_data, "~> 1.1", only: :test},
+      # Spec, tests and code kept aligned (macaw_compose spec/00 §4.1); dev/test only.
+      {:surfex, "~> 0.10.0", only: [:dev, :test], runtime: false}
     ]
   end
 end

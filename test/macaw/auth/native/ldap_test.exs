@@ -73,6 +73,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
 
   defp auth(source, username, password), do: Ldap.authenticate(source, username, password, [])
 
+  @tag verifies: "ldap-direct-bind"
   test "direct bind, as on the NAS: groups give the roles, required_group admits" do
     assert {:ok, alice} = auth(nas(), "alice", "alice-password")
     assert %{username: "alice", roles: ["admin"], display_name: "Alice Admin"} = alice
@@ -89,12 +90,14 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     assert {:error, :invalid_username} = auth(nas(), "Bad User", "bad-password")
   end
 
+  @tag verifies: "ldap-roles"
   test "every mapped role of every group, in the mapping's terms" do
     mapping = %{"macaw-admin" => ["admin", "operator"], "macaw" => "viewer"}
     assert {:ok, %{roles: roles}} = auth(nas(%{role_mapping: mapping}), "alice", "alice-password")
     assert Enum.sort(roles) == ["admin", "operator", "viewer"]
   end
 
+  @tag verifies: "ldap-injection"
   test "a username can't change the DN or widen a search" do
     assert {:error, :invalid_credentials} = auth(nas(), "alice,cn=users", "alice-password")
     assert {:error, :invalid_credentials} = auth(nas(), "alice;x", "alice-password")
@@ -103,23 +106,14 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     assert {:error, :user_not_found} = auth(search(), "alice)(|(uid=*", "alice-password")
   end
 
-  test "search mode, anonymous search, ambiguity and memberOf" do
+  @tag verifies: "ldap-search"
+  test "search mode, anonymous search, ambiguity and a refused service bind" do
     assert {:ok, %{roles: ["admin"]}} = auth(search(), "alice", "alice-password")
     assert {:error, :invalid_credentials} = auth(search(), "alice", "wrong")
     assert {:error, :ambiguous_user} = auth(search(), "dave", "dave-password")
 
     anonymous = search(%{search: %{base_dn: "cn=users,#{@base}"}, allow_anonymous_search: true})
     assert {:ok, %{roles: ["viewer"]}} = auth(anonymous, "bob", "bob-password")
-
-    member_of =
-      nas(%{
-        groups: %{from: :member_of},
-        required_group: "staff",
-        role_mapping: %{"staff" => "admin"}
-      })
-
-    assert {:ok, %{roles: ["admin"]}} = auth(member_of, "alice", "alice-password")
-    assert {:error, :not_in_group} = auth(member_of, "bob", "bob-password")
 
     capture_log(fn ->
       bad =
@@ -129,6 +123,20 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     end)
   end
 
+  @tag verifies: "ldap-member-of"
+  test "groups from memberOf" do
+    member_of =
+      nas(%{
+        groups: %{from: :member_of},
+        required_group: "staff",
+        role_mapping: %{"staff" => "admin"}
+      })
+
+    assert {:ok, %{roles: ["admin"]}} = auth(member_of, "alice", "alice-password")
+    assert {:error, :not_in_group} = auth(member_of, "bob", "bob-password")
+  end
+
+  @tag verifies: "ldap-tls"
   test "LDAPS and StartTLS verify the certificate and the hostname" do
     ldaps = nas(%{ssl: true, starttls: false, port: ldaps_port()})
     assert {:ok, _} = auth(ldaps, "bob", "bob-password")
@@ -148,6 +156,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     assert {:ok, _} = auth(nas(%{cacertfile: nil, verify_peer: false}), "bob", "bob-password")
   end
 
+  @tag verifies: "ldap-plaintext"
   test "plaintext: refused unless allowed" do
     assert {:error, "sources[nas].ssl: is false" <> _} =
              Ldap.parse(
@@ -179,6 +188,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     defp sign_in(username, password),
       do: Native.authenticate(%{username: username, password: password})
 
+    @tag verifies: "ldap-chain-provision"
     test "a directory user is provisioned, and their roles follow the directory" do
       chain([local(), nas()])
 
@@ -196,6 +206,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
       assert sign_in("carol", "carol-password") == {:error, :invalid_credentials}
     end
 
+    @tag verifies: "provision-no-takeover-ldap"
     test "the directory's owner never becomes the local owner" do
       local_user!("owner", "local owner password")
 
@@ -208,6 +219,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
       assert Repo.aggregate(UserRecord, :count) == 1
     end
 
+    @tag verifies: "ldap-chain-unreachable"
     test "an unreachable directory never locks a local user out" do
       local_user!("root", "local admin password")
 
@@ -218,6 +230,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
       end)
     end
 
+    @tag verifies: "ldap-chain-search-final"
     test "search mode: a wrong password at a found entry is final" do
       local_user!("bob", "local bob password")
       chain([search(), local()])
@@ -225,6 +238,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     end
   end
 
+  @tag verifies: "ldap-diagnose"
   test "diagnose says how each step went, without the password" do
     steps = Ldap.diagnose(nas(), "alice", "alice-password")
 
@@ -262,5 +276,245 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
 
       assert [{"connect", :error, _}] = Ldap.diagnose(nas(%{port: 1}), "alice", "alice-password")
     end)
+  end
+
+  # Each section's own text, beside the hints inside it.
+  describe "the sections of spec 07" do
+    @tag verifies: "auth-ldap-connect"
+    test "failures told apart, TLS verified, each failure logged by name and never a password" do
+      # LDAPS to a port where nothing listens is unreachable, not a TLS failure.
+      ldaps_down = nas(%{ssl: true, starttls: false, port: 1})
+
+      log =
+        capture_log(fn ->
+          assert {:error, :connect_failed} = auth(ldaps_down, "bob", "bob-password")
+          assert {:error, :connect_failed} = auth(nas(%{port: 1}), "bob", "bob-password")
+          assert {:error, :tls_failed} = auth(nas(%{cacertfile: nil}), "bob", "bob-password")
+
+          bad_service =
+            search(%{
+              search: %{
+                base_dn: @base,
+                bind_dn: "cn=svc,#{@base}",
+                bind_password: "svc-wrong-secret"
+              }
+            })
+
+          assert {:error, :search_failed} = auth(bad_service, "alice", "alice-password")
+        end)
+
+      assert log =~ "LDAP source nas: the directory could not be reached (#{host()}:1)"
+      assert log =~ "LDAP source nas: TLS failed: the certificate did not verify"
+      assert log =~ "(#{host()}:#{port()})"
+      assert log =~ "LDAP source nas: the search failed"
+      refute log =~ "svc-wrong-secret"
+      refute log =~ "alice-password"
+      refute log =~ "bob-password"
+
+      # The chain and the hostname are verified, with SNI and depth 3, against
+      # cacertfile or the system's CAs; verify_peer: false turns it off.
+      options = Ldap.tls_options(nas())
+      assert options[:verify] == :verify_peer
+      assert options[:server_name_indication] == String.to_charlist(host())
+      assert options[:depth] == 3
+      assert options[:cacertfile] == String.to_charlist(@ca)
+      assert [_ | _] = Ldap.tls_options(nas(%{cacertfile: nil}))[:cacerts]
+      assert [_ | _] = options[:customize_hostname_check][:match_fun] |> List.wrap()
+      assert Ldap.tls_options(nas(%{verify_peer: false})) == [verify: :verify_none]
+
+      assert {"TLS", :ok, "StartTLS, certificate NOT verified (verify_peer: false)"} =
+               Enum.at(
+                 Ldap.diagnose(
+                   nas(%{cacertfile: nil, verify_peer: false}),
+                   "bob",
+                   "bob-password"
+                 ),
+                 1
+               )
+    end
+
+    @tag verifies: "auth-ldap-flow"
+    test "no password, a trimmed username, the directory's spelling, the entry's attributes" do
+      # Refused before connecting: even an unreachable directory says :empty_password.
+      assert {:error, :empty_password} = auth(nas(%{port: 1}), "bob", nil)
+
+      assert {:ok, %{username: "bob"}} = auth(nas(), "  bob  ", "bob-password")
+      assert {:error, :user_not_found} = auth(nas(), "", "bob-password")
+      assert {:error, :user_not_found} = auth(nas(), "   ", "bob-password")
+
+      # A search base that doesn't exist is no entry.
+      nowhere =
+        search(%{
+          search: %{
+            base_dn: "ou=nowhere,#{@base}",
+            bind_dn: "cn=svc,#{@base}",
+            bind_password: "svc-test-password"
+          }
+        })
+
+      assert {:error, :user_not_found} = auth(nowhere, "alice", "alice-password")
+
+      # The username is the directory's spelling, not what was typed.
+      assert {:ok, %{username: "alice"}} = auth(nas(), "ALICE", "alice-password")
+
+      assert {:ok, alice} = auth(nas(), "alice", "alice-password")
+
+      assert Enum.sort(alice.extra["groups"]) == [
+               "cn=macaw,cn=groups,#{@base}",
+               "cn=macaw-admin,cn=groups,#{@base}"
+             ]
+
+      # Without the id attribute on the entry, the external id is the DN.
+      assert {:ok, %{extra: %{"external_id" => "uid=alice,cn=users," <> _}}} =
+               auth(nas(%{id_attr: "employeeNumber"}), "alice", "alice-password")
+
+      # A non-ASCII password goes as its UTF-8 bytes: refused as any wrong one.
+      assert {:error, :invalid_credentials} = auth(nas(), "alice", "pässwörd-✓")
+
+      # The connection is closed after, whatever the outcome: each connection
+      # process the sign-in started ends.
+      for {name, password, outcome} <- [
+            {"bob", "bob-password", :ok},
+            {"carol", "carol-password", :error},
+            {"alice", "wrong", :error}
+          ] do
+        {:links, before} = Process.info(self(), :links)
+        assert {^outcome, _} = auth(nas(), name, password)
+        {:links, now} = Process.info(self(), :links)
+        assert [_ | _] = connections = now -- before
+
+        for pid <- connections do
+          ref = Process.monitor(pid)
+          assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1000
+        end
+      end
+    end
+
+    @tag verifies: "auth-ldap-groups"
+    test "groups by memberOf, by member DN, by memberUid as spelled; matched by DN or CN; roles once" do
+      # memberOf, the required group named by its DN in another case.
+      member_of =
+        nas(%{
+          groups: %{from: :member_of},
+          required_group: "CN=STAFF,CN=GROUPS,DC=EXAMPLE,DC=TEST",
+          role_mapping: %{"Staff" => "admin"}
+        })
+
+      assert {:ok, %{roles: ["admin"], extra: %{"groups" => ["cn=staff,cn=groups," <> _]}}} =
+               auth(member_of, "alice", "alice-password")
+
+      # groupOfNames: member holds the user's DN.
+      by_member =
+        nas(%{
+          groups: %{base_dn: "cn=groups,#{@base}", member_attr: "member"},
+          required_group: "staff",
+          role_mapping: %{"staff" => "admin"}
+        })
+
+      assert {:ok, %{roles: ["admin"]}} = auth(by_member, "alice", "alice-password")
+      assert {:error, :not_in_group} = auth(by_member, "bob", "bob-password")
+
+      # posixGroup: memberUid holds the uid as the directory spells it, not as typed.
+      assert {:ok, %{roles: ["admin"]}} = auth(nas(), "ALICE", "alice-password")
+
+      # Every role every matching group maps to, each once; else the default.
+      once = %{"macaw" => ["viewer", "admin"], "macaw-admin" => "admin"}
+      assert {:ok, %{roles: roles}} = auth(nas(%{role_mapping: once}), "alice", "alice-password")
+      assert Enum.sort(roles) == ["admin", "viewer"]
+
+      unmapped = nas(%{role_mapping: %{"nothing" => "x"}, default_role: ["guest", "viewer"]})
+      assert {:ok, %{roles: ["guest", "viewer"]}} = auth(unmapped, "bob", "bob-password")
+    end
+
+    @tag verifies: "auth-ldap-check"
+    test "diagnose names each transport and search, and the task prints a line a step" do
+      ldaps = nas(%{ssl: true, starttls: false, port: ldaps_port()})
+
+      assert {"TLS", :ok, "LDAPS, certificate and hostname verified"} =
+               Enum.at(Ldap.diagnose(ldaps, "bob", "bob-password"), 1)
+
+      plain = nas(%{starttls: false, allow_plaintext: true})
+
+      assert {"TLS", :ok, "plain LDAP: passwords are sent unencrypted (allow_plaintext: true)"} =
+               Enum.at(Ldap.diagnose(plain, "bob", "bob-password"), 1)
+
+      anonymous = search(%{search: %{base_dn: "cn=users,#{@base}"}, allow_anonymous_search: true})
+
+      assert {"find the user's DN", :ok,
+              "searched cn=users,#{@base} for (uid=bob) anonymously: DN uid=bob,cn=users," <> _} =
+               Enum.at(Ldap.diagnose(anonymous, "bob", "bob-password"), 2)
+
+      steps = Ldap.diagnose(nas(), "alice", "alice-password")
+      assert {"connect", :ok, "#{host()}:#{port()} is reachable"} == hd(steps)
+      assert {"username", :ok, "alice"} = Enum.at(steps, 5)
+      assert {"required group", :ok, "member of macaw"} = Enum.at(steps, 7)
+
+      # The task, against the configured source, the password from its variable.
+      previous = Application.get_env(:macaw_auth, Macaw.Auth.Native)
+      password = System.get_env("MACAW_AUTH_CHECK_PASSWORD")
+      Mix.shell(Mix.Shell.Process)
+
+      on_exit(fn ->
+        Mix.shell(Mix.Shell.IO)
+        Application.put_env(:macaw_auth, Macaw.Auth.Native, previous)
+
+        if password,
+          do: System.put_env("MACAW_AUTH_CHECK_PASSWORD", password),
+          else: System.delete_env("MACAW_AUTH_CHECK_PASSWORD")
+      end)
+
+      Application.put_env(:macaw_auth, Macaw.Auth.Native,
+        repo: Repo,
+        sources: [
+          %{
+            type: :ldap,
+            name: "nas",
+            host: host(),
+            port: port(),
+            ssl: false,
+            starttls: true,
+            cacertfile: @ca,
+            user_dn_template: "uid={username},cn=users,#{@base}",
+            groups: %{base_dn: "cn=groups,#{@base}", member_attr: "memberUid"},
+            required_group: "macaw",
+            role_mapping: %{"macaw-admin" => "admin"}
+          }
+        ]
+      )
+
+      assert {0, lines} = check_task(["nas", "alice"], "alice-password")
+      assert length(lines) == 9
+      assert "ok     connect: " <> _ = hd(lines)
+      assert "ok     roles: admin" == List.last(lines)
+      refute Enum.join(lines) =~ "alice-password"
+
+      assert {1, lines} = check_task(["nas", "alice"], "nope")
+
+      assert "FAILED bind as the user: the directory refused the password for that DN" ==
+               List.last(lines)
+    end
+  end
+
+  # Runs mix macaw_auth.ldap.check as Mix would: `{exit status, printed lines}`.
+  defp check_task(argv, password) do
+    System.put_env("MACAW_AUTH_CHECK_PASSWORD", password)
+    Process.flag(:trap_exit, true)
+    running = Task.async(fn -> Mix.Tasks.MacawAuth.Ldap.Check.run(argv) end)
+
+    status =
+      case Task.yield(running, 10_000) do
+        {:ok, _} -> 0
+        {:exit, {:shutdown, status}} -> status
+      end
+
+    {status, shell_lines()}
+  end
+
+  defp shell_lines do
+    receive do
+      {:mix_shell, :info, [line]} -> [line | shell_lines()]
+    after
+      0 -> []
+    end
   end
 end

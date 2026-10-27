@@ -43,6 +43,10 @@ with [local, directory], a local user's directory password is refused without th
 with [unreachable directory, local], a local user signs in, and a wrong password is :invalid_credentials
 ```
 
+```test:chain-none-knows
+with [local, directory] and a username neither has, the directory is asked too, and the refusal is :invalid_credentials
+```
+
 ## 3. Local passwords {#auth-source-password}
 
 `Macaw.Auth.Native.Source.Password`: users with a `macaw_auth_users` row that has a password hash. `%{type: :password}` (named `"local"`) or `%{type: :password, name: "staff"}`; its only keys are `type` and `name`.
@@ -73,7 +77,7 @@ a row with source "nas" and no hash refuses "" and "anything" with :invalid_cred
 
 ## 4. Provisioning directory users {#auth-provision}
 
-`Macaw.Auth.Native.Provision.directory_user/3` (`repo`, the source's name, its `attrs`) gives the row for a user a directory accepted (ported from exio's `External.resolve/2`):
+`Macaw.Auth.Native.Provision` is where the chain makes them: `Macaw.Auth.Native.Provision.directory_user/3` (`repo`, the source's name, its `attrs`) gives the row for a user a directory accepted (ported from exio's `External.resolve/2`):
 - **first sign-in:** a new row with the directory's normalized username, `source` the directory's name, **no password**, and its display name, roles and `extra`;
 - **every later sign-in: the directory's word replaces** the row's roles and display name, and its `extra` is merged over the row's. The directory is the authority on who is in which group, so a user removed from an admin group loses the role at their next sign-in, not whenever someone remembers to edit the row;
 - **a row with that username that another source owns** (a local user, or another directory's) **is never taken over:** `{:error, :username_taken}`. A directory that happens to have an `owner` entry doesn't become the local `owner`;
@@ -91,6 +95,10 @@ roles edited locally to ["superuser"] are back to the directory's ["viewer", "ad
 
 ```test:provision-no-takeover
 a directory entry "owner" never signs in as the local "owner", whichever order the sources are in, and the local row keeps source "local"; a user provisioned by directory "a" is refused by directory "b"
+```
+
+```test:provision-no-takeover-ldap
+on the fixture directory, through the chain: its "owner" entry's password never signs in as the local "owner", with [local, directory] or [directory, local]; the local owner signs in from "local", and there is one row
 ```
 
 ```test:provision-disabled

@@ -65,6 +65,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
   end
 
   describe "the token" do
+    @tag verifies: "sessions-no-token-property"
     property "no form of a token is ever written, in any column of any row" do
       check all(n <- integer(1..6), max_runs: 15) do
         user = user!()
@@ -106,6 +107,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
       end
     end
 
+    @tag verifies: "sessions-record-client"
     test "a session records the client, the user agent truncated to 255" do
       user = user!()
 
@@ -122,6 +124,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert String.length(agent) == 255
     end
 
+    @tag verifies: "sessions-invalid"
     test "a garbage token and an id that is no session are invalid" do
       assert Native.fetch_session(:crypto.strong_rand_bytes(32), []) == {:error, :invalid}
       assert Native.fetch_session_by_id("not-a-uuid", []) == {:error, :invalid}
@@ -129,6 +132,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Native.fetch_session_by_id(nil, []) == {:error, :invalid}
     end
 
+    @tag verifies: "sessions-create-deleted-user"
     test "a user deleted since signing in gets no session" do
       ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
       user = user!()
@@ -139,21 +143,10 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Repo.aggregate(SessionRecord, :count) == 0
       refute_received {[:macaw_auth, :native, :session], ^ref, _, _}
     end
-
-    test "creating a session emits telemetry without the token" do
-      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
-      user = user!()
-      {:ok, _token, _} = Native.create_session(user, now: @t0)
-      uid = user.id
-
-      assert_received {[:macaw_auth, :native, :session], ^ref, %{count: 1},
-                       %{event: :created, reason: nil, user_id: ^uid} = meta}
-
-      assert map_size(meta) == 3
-    end
   end
 
   describe "idle expiry and touch, with an injected clock" do
+    @tag verifies: "sessions-idle"
     test "a session idle longer than session_idle_days expires and is deleted" do
       ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
       user = user!()
@@ -170,6 +163,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
                        %{event: :expired, reason: :idle, user_id: ^uid}}
     end
 
+    @tag verifies: "sessions-idle-configured"
     test "the idle period is configured" do
       configure!(session_idle_days: 1)
       {:ok, token, _} = Native.create_session(user!(), now: @t0)
@@ -177,13 +171,16 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Native.fetch_session(token, now: at(86_401)) == {:error, :expired}
     end
 
+    @tag verifies: "sessions-idle-seconds"
     test "the backend reports its idle limit in seconds" do
       assert Native.session_idle_seconds([]) == @idle
       assert Auth.session_idle_seconds() == @idle
       configure!(session_idle_days: 1)
       assert Native.session_idle_seconds([]) == 86_400
+      assert Auth.session_idle_seconds() == 86_400
     end
 
+    @tag verifies: "sessions-touch-hourly"
     test "touch: true writes last_used_at at most hourly, and so extends the session" do
       {:ok, token, session} = Native.create_session(user!(), now: @t0)
 
@@ -209,18 +206,28 @@ defmodule Macaw.Auth.Native.SessionsTest do
                {:error, :expired}
     end
 
-    test "touch: false never extends, by token or by id" do
+    @tag verifies: "sessions-no-touch"
+    test "touch: false never extends, by token or by id, and no :touch is touch: false" do
       {:ok, token, session} = Native.create_session(user!(), now: @t0)
 
       for hours <- [2, 30, 24 * 13] do
         assert {:ok, _, _} = Native.fetch_session(token, touch: false, now: at(hours * 3_600))
-        assert {:ok, _, _} = Native.fetch_session_by_id(session.id, now: at(hours * 3_600))
+
+        assert {:ok, _, _} =
+                 Native.fetch_session_by_id(session.id, touch: false, now: at(hours * 3_600))
       end
 
       assert row(session).last_used_at == @t0
       assert Native.fetch_session_by_id(session.id, now: at(@idle + 1)) == {:error, :expired}
+
+      # No :touch option at all, by token or by id, at two hours: no write either.
+      {:ok, token, session} = Native.create_session(user!(), now: @t0)
+      assert {:ok, _, _} = Native.fetch_session(token, now: at(7_200))
+      assert {:ok, _, _} = Native.fetch_session_by_id(session.id, now: at(7_200))
+      assert row(session).last_used_at == @t0
     end
 
+    @tag verifies: "sessions-touch-revoked"
     test "a touch racing a revocation is :invalid, never a crash" do
       {:ok, token, session} = Native.create_session(user!(), now: @t0)
       # The session is read, then its user: the revocation lands between
@@ -230,15 +237,10 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Native.fetch_session(token, touch: true, now: at(3_600)) == {:error, :invalid}
       assert Repo.get(SessionRecord, session.id) == nil
     end
-
-    test "the default is not to touch" do
-      {:ok, token, session} = Native.create_session(user!(), now: @t0)
-      assert {:ok, _, _} = Native.fetch_session(token, now: at(7_200))
-      assert row(session).last_used_at == @t0
-    end
   end
 
   describe "a disabled user" do
+    @tag verifies: "sessions-disabled"
     test "has their session deleted and refused" do
       ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
       user = user!()
@@ -261,6 +263,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
   end
 
   describe "listing" do
+    @tag verifies: "sessions-list"
     test "newest first, by created at and then id when timestamps tie" do
       user = user!()
       {:ok, _, old} = Native.create_session(user, now: at(0))
@@ -273,6 +276,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert ids == [new.id] ++ tied_ids ++ [old.id]
     end
 
+    @tag verifies: "sessions-list-junk"
     test "an id that is no user lists nothing" do
       assert Native.list_sessions("nope", []) == []
       assert Native.list_sessions(Ecto.UUID.generate(), []) == []
@@ -280,6 +284,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
   end
 
   describe "revocation" do
+    @tag verifies: "sessions-revoke"
     test "one session, or a user's but one; only deleting, no push" do
       user = user!()
       {:ok, _, a} = Native.create_session(user, [])
@@ -299,19 +304,37 @@ defmodule Macaw.Auth.Native.SessionsTest do
       refute_received {:sessions_revoked, _}
     end
 
+    @tag verifies: "sessions-revoke-junk"
     test "an id that is nothing revokes nothing" do
       assert Native.revoke_sessions("junk", []) == {nil, []}
       assert Native.revoke_sessions({:user, "junk"}, []) == {"junk", []}
     end
 
-    test "the reason goes to telemetry" do
-      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
-      user = user!()
-      for _ <- 1..2, do: Native.create_session(user, [])
-      :ok = Auth.revoke({:user, user.id}, reason: :password_changed)
+    @tag verifies: "sessions-revoke-all"
+    test "an administrator's change revokes every session and tells the pages, unless told not to" do
+      configure!(sealing_key: :crypto.strong_rand_bytes(32))
+      record = local_user!("rhea", "correct horse battery")
+      user = Native.to_user(record)
+      :ok = Auth.subscribe(user.id)
 
-      assert_received {[:macaw_auth, :native, :session], ^ref, %{count: 2},
-                       %{event: :revoked, reason: :password_changed}}
+      {:ok, token, _} = Native.create_session(user, [])
+      assert {:ok, _} = Native.set_password("rhea", "a new password")
+      assert Native.fetch_session(token, []) == {:error, :invalid}
+      assert_receive {:sessions_revoked, [_]}
+
+      {:ok, token, _} = Native.create_session(user, [])
+      assert Native.admin_reset(user) == :ok
+      assert Native.fetch_session(token, []) == {:error, :invalid}
+      assert_receive {:sessions_revoked, [_]}
+
+      {:ok, token, _} = Native.create_session(user, [])
+      assert {:ok, _} = Native.set_password("rhea", "another password", announce: false)
+      assert Native.fetch_session(token, []) == {:error, :invalid}
+
+      {:ok, token, _} = Native.create_session(user, [])
+      assert Native.admin_reset(user, announce: false) == :ok
+      assert Native.fetch_session(token, []) == {:error, :invalid}
+      refute_receive {:sessions_revoked, _}, 50
     end
   end
 
@@ -333,7 +356,8 @@ defmodule Macaw.Auth.Native.SessionsTest do
       pid
     end
 
-    test "with the local Registry" do
+    @tag verifies: "sessions-revoke-pages"
+    test "with the local Registry, and then with Phoenix.PubSub" do
       user = user!()
       {:ok, token, session} = Native.create_session(user, [])
       open_page(user.id)
@@ -343,8 +367,24 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert_receive {:page, {:sessions_revoked, [id]}}
       assert id == session.id
       assert Auth.fetch(token) == {:error, :invalid}
+
+      # The same, over the host's PubSub: all but the kept session.
+      start_supervised!({Phoenix.PubSub, name: Macaw.Auth.Test.PubSub})
+      Application.put_env(:macaw_auth, :pubsub, Macaw.Auth.Test.PubSub)
+      on_exit(fn -> Application.delete_env(:macaw_auth, :pubsub) end)
+
+      {:ok, _, keep} = Native.create_session(user, [])
+      {:ok, _, gone} = Native.create_session(user, [])
+      open_page(user.id)
+
+      :ok = Auth.revoke({:user, user.id}, except: keep.id)
+
+      assert_receive {:page, {:sessions_revoked, [id]}}
+      assert id == gone.id
+      assert Enum.map(Native.list_sessions(user.id, []), & &1.id) == [keep.id]
     end
 
+    @tag verifies: "revocation-pubsub"
     test "with Phoenix.PubSub" do
       start_supervised!({Phoenix.PubSub, name: Macaw.Auth.Test.PubSub})
       Application.put_env(:macaw_auth, :pubsub, Macaw.Auth.Test.PubSub)
@@ -363,6 +403,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
   end
 
   describe "steps" do
+    @tag verifies: "sessions-steps"
     test "the second factor is marked passed; other steps are kept as names" do
       user = user!(%{must_change_password: true})
       {:ok, token, session} = Native.create_session(user, second_factor_passed: false)
@@ -380,6 +421,7 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Auth.pending_step(user, elem(Native.fetch_session(token, []), 2)) == nil
     end
 
+    @tag verifies: "sessions-steps-unknown-name"
     test "a stored name that is no step is dropped, never made an atom" do
       {:ok, token, session} = Native.create_session(user!(), [])
 
@@ -394,12 +436,14 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert_raise ArgumentError, fn -> String.to_existing_atom("no_such_step_xyz") end
     end
 
+    @tag verifies: "sessions-steps-gone"
     test "completing a step of a session that doesn't exist is :invalid" do
       for step <- Auth.steps(), id <- [Ecto.UUID.generate(), "junk"] do
         assert Native.complete_step(id, step, []) == {:error, :invalid}
       end
     end
 
+    @tag verifies: "sessions-steps-revoked"
     test "a password change racing a revocation is :invalid, and the session stays gone" do
       {:ok, _token, session} = Native.create_session(user!(), [])
       # Revoked between the step's read of the row and its write.
@@ -407,6 +451,243 @@ defmodule Macaw.Auth.Native.SessionsTest do
 
       assert Native.complete_step(session.id, :password_change, []) == {:error, :invalid}
       assert Repo.get(SessionRecord, session.id) == nil
+    end
+  end
+
+  describe "telemetry" do
+    @tag verifies: "sessions-telemetry"
+    test "creating emits :created with exactly the event, reason and user; a revocation its reason" do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
+      user = user!()
+      uid = user.id
+      {:ok, _token, _} = Native.create_session(user, now: @t0)
+
+      assert_received {[:macaw_auth, :native, :session], ^ref, %{count: 1}, meta}
+      assert meta == %{event: :created, reason: nil, user_id: uid}
+
+      {:ok, _token, _} = Native.create_session(user, now: @t0)
+      :ok = Auth.revoke({:user, user.id}, reason: :password_changed)
+
+      assert_received {[:macaw_auth, :native, :session], ^ref, %{count: 2},
+                       %{event: :revoked, reason: :password_changed, user_id: ^uid}}
+    end
+  end
+
+  # Each section's own text, beside the hints inside it.
+  describe "the sections of spec 09" do
+    alias Macaw.Auth.Native.Sessions
+
+    # A time with millisecond precision, as a host's clock may give it.
+    @ms ~U[2026-10-01 12:00:00.123Z]
+
+    defp events(ref, acc \\ []) do
+      receive do
+        {[:macaw_auth, :native, :session], ^ref, measurements, meta} ->
+          events(ref, [{measurements, meta} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    @tag verifies: "auth-sessions"
+    test "the session callbacks are Sessions' functions, and each honors :now at microsecond precision" do
+      user = user!()
+      at_us = %{@ms | microsecond: {123_000, 6}}
+
+      {:ok, token, session} = Sessions.create(user, now: @ms)
+      assert session.created_at == at_us and session.last_used_at == at_us
+      assert row(session).inserted_at == at_us
+
+      # The backend's callbacks are these functions.
+      assert Native.fetch_session(token, now: @ms) == Sessions.fetch(token, now: @ms)
+      assert Native.list_sessions(user.id, []) == Sessions.list(user.id, [])
+
+      later = DateTime.add(@ms, 3_600, :second)
+      later_us = %{later | microsecond: {123_000, 6}}
+      assert {:ok, _, %{last_used_at: ^later_us}} = Sessions.fetch(token, touch: true, now: later)
+
+      assert {:ok, _, %{last_used_at: ^later_us}} =
+               Sessions.fetch_by_id(session.id, now: later)
+
+      # The touch already wrote updated_at at `later`: the step at the same
+      # `later` keeps it, never the system clock.
+      :ok = Sessions.complete_step(session.id, :password_change, now: later)
+      assert row(session).updated_at == later_us
+
+      # :now decides expiry, by token and by id.
+      past = DateTime.add(later, @idle + 1, :second)
+      assert Sessions.fetch_by_id(session.id, now: past) == {:error, :expired}
+      assert Sessions.revoke(session.id, []) == {nil, []}
+    end
+
+    @tag verifies: "auth-sessions-token"
+    test "the row: the token's SHA-256 alone, unique, and the client, defaults and times" do
+      user = user!()
+      {:ok, token, session} = Sessions.create(user, remote_ip: "198.51.100.4", now: @t0)
+      stored = row(session)
+
+      assert Sessions.hash(token) == :crypto.hash(:sha256, token)
+      assert stored.token_hash == Sessions.hash(token)
+
+      assert %SessionRecord{
+               user_id: uid,
+               remote_ip: "198.51.100.4",
+               user_agent: nil,
+               second_factor_passed: true,
+               completed_steps: [],
+               last_used_at: @t0,
+               inserted_at: @t0,
+               updated_at: @t0
+             } = stored
+
+      assert uid == user.id
+      assert Sessions.to_session(stored) == session
+      assert Sessions.to_session(stored).created_at == stored.inserted_at
+
+      {:ok, _, owing} = Sessions.create(user, second_factor_passed: false, now: @t0)
+      assert row(owing).second_factor_passed == false
+
+      # token_hash is unique.
+      assert_raise Ecto.ConstraintError, fn ->
+        Repo.insert!(%SessionRecord{
+          user_id: user.id,
+          token_hash: stored.token_hash,
+          last_used_at: @t0
+        })
+      end
+
+      # Deleting the user deletes their sessions.
+      Repo.delete_all(where(Native.UserRecord, id: ^user.id))
+      assert Repo.aggregate(SessionRecord, :count) == 0
+    end
+
+    @tag verifies: "auth-sessions-fetch"
+    test "a look-up reports the user as now, a disabled one before an idle one, and a raced delete does nothing" do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
+      record = local_user!("sid", "correct horse battery")
+      user = Native.to_user(record)
+      {:ok, token, session} = Sessions.create(user, now: @t0)
+
+      # The user as they are now: their roles changed since signing in.
+      {:ok, _} = Native.set_roles("sid", ["editor"])
+      assert {:ok, %{roles: ["editor"]}, _} = Sessions.fetch(token, now: @t0)
+      assert {:ok, %{roles: ["editor"]}, _} = Sessions.fetch_by_id(session.id, now: @t0)
+
+      # Disabled and idle too long: the disabled user's refusal comes first.
+      Native.UserRecord
+      |> Repo.get!(user.id)
+      |> Ecto.Changeset.change(disabled_at: @t0)
+      |> Repo.update!()
+
+      {:ok, token2, raced} = Sessions.create(user, now: @t0)
+      _ = events(ref)
+
+      assert Sessions.fetch_by_id(session.id, now: at(@idle + 1)) == {:error, :disabled}
+      assert [{%{count: 1}, %{event: :revoked, reason: :disabled}}] = events(ref)
+
+      # A revocation racing the look-up: the delete finds nothing, and does nothing.
+      after_first_query("macaw_auth_users", fn -> delete_row(raced) end)
+      assert Sessions.fetch(token2, now: @t0) == {:error, :disabled}
+      assert events(ref) == []
+      assert Sessions.fetch(token2, now: @t0) == {:error, :invalid}
+    end
+
+    @tag verifies: "auth-sessions-touch"
+    test "idle expiry slides with each touch, which writes last_used_at and updated_at by the row's update" do
+      {:ok, token, session} = Sessions.create(user!(), now: @t0)
+
+      # Touched every thirteen days, it lives on past forty.
+      for day <- [13, 26, 39] do
+        assert {:ok, _, _} = Sessions.fetch(token, touch: true, now: at(day * 86_400))
+        assert %{last_used_at: t, updated_at: t} = row(session)
+        assert t == at(day * 86_400)
+      end
+
+      assert {:ok, _, _} = Sessions.fetch(token, now: at(39 * 86_400 + @idle))
+      assert Sessions.fetch(token, now: at(39 * 86_400 + @idle + 1)) == {:error, :expired}
+      assert Repo.get(SessionRecord, session.id) == nil
+    end
+
+    @tag verifies: "auth-sessions-disabled"
+    test "a disabled user's session is refused at the next look-up, and no open page is told" do
+      user = user!()
+      {:ok, token, _} = Sessions.create(user, now: @t0)
+      {:ok, _, by_id} = Sessions.create(user, now: @t0)
+      :ok = Auth.subscribe(user.id)
+
+      Native.UserRecord
+      |> Repo.get!(user.id)
+      |> Ecto.Changeset.change(disabled_at: @t0)
+      |> Repo.update!()
+
+      assert Sessions.fetch(token, now: @t0) == {:error, :disabled}
+      assert Sessions.fetch_by_id(by_id.id, now: @t0) == {:error, :disabled}
+      assert Sessions.list(user.id, []) == []
+      refute_receive {:sessions_revoked, _}, 50
+    end
+
+    @tag verifies: "auth-sessions-revoke"
+    test "list gives the contract's sessions; revoke_all deletes with its reason and answers :ok" do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
+      user = user!()
+      uid = user.id
+      {:ok, _, a} = Sessions.create(user, now: at(0))
+      {:ok, _, b} = Sessions.create(user, now: at(1))
+      assert Sessions.list(user.id, []) == [b, a]
+      _ = events(ref)
+
+      assert Sessions.revoke_all(user.id, :password_changed, announce: false) == :ok
+
+      assert [{%{count: 2}, %{event: :revoked, reason: :password_changed, user_id: ^uid}}] =
+               events(ref)
+
+      assert Sessions.list(user.id, []) == []
+      # Nothing left: :ok, and no event.
+      assert Sessions.revoke_all(user.id, :password_changed, announce: false) == :ok
+      assert events(ref) == []
+    end
+
+    @tag verifies: "auth-sessions-steps"
+    test "both second-factor steps pass it; a completed step is :ok without a write; names are stored as text" do
+      user = user!()
+      {:ok, _, session} = Sessions.create(user, second_factor_passed: false, now: @t0)
+      :ok = Sessions.complete_step(session.id, :second_factor_enroll, now: at(1))
+      assert %{second_factor_passed: true, updated_at: updated} = row(session)
+      assert updated == at(1)
+
+      :ok = Sessions.complete_step(session.id, :password_change, now: at(2))
+      assert Sessions.complete_step(session.id, :password_change, now: at(3)) == :ok
+      assert row(session).updated_at == at(2)
+
+      # JSON text on SQLite, as the column type stores an array of strings there.
+      %{rows: [[raw]]} =
+        Repo.query!("SELECT completed_steps FROM macaw_auth_sessions WHERE id = ?", [session.id])
+
+      assert JSON.decode!(raw) == ["password_change"]
+    end
+
+    @tag verifies: "auth-sessions-telemetry"
+    test "every event has exactly event, reason and user_id, and none carries the token or its hash" do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
+      user = user!()
+      {:ok, idle, _} = Sessions.create(user, now: @t0)
+      {:ok, token, _} = Sessions.create(user, now: @t0)
+      {:error, :expired} = Sessions.fetch(idle, now: at(@idle + 1))
+      :ok = Auth.revoke({:user, user.id}, reason: :signed_out)
+
+      seen = events(ref)
+
+      assert Enum.map(seen, fn {_, meta} -> {meta.event, meta.reason} end) ==
+               [{:created, nil}, {:created, nil}, {:expired, :idle}, {:revoked, :signed_out}]
+
+      for {measurements, meta} <- seen, token <- [idle, token] do
+        assert Map.keys(meta) |> Enum.sort() == [:event, :reason, :user_id]
+        assert Map.keys(measurements) == [:count]
+        text = inspect({measurements, meta}, limit: :infinity)
+
+        for form <- [token, Sessions.hash(token), Base.encode64(token), Base.encode16(token)],
+            do: refute(text =~ inspect(form) or text =~ form)
+      end
     end
   end
 end

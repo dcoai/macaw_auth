@@ -26,6 +26,7 @@ defmodule Macaw.Auth.Native.UsersTest do
     do: Native.authenticate(%{username: username, password: password})
 
   describe "bootstrap_admin/1" do
+    @tag verifies: "users-bootstrap"
     test "makes the first user, a local one with the given role, only when there is none" do
       assert {:ok, %UserRecord{} = record} =
                Native.bootstrap_admin(%{
@@ -53,8 +54,9 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert Repo.aggregate(UserRecord, :count) == 1
     end
 
+    @tag verifies: "users-bootstrap-exists"
     test "does nothing when any user exists, whoever it is, even without a password" do
-      local_user!("alice", "correct horse battery", %{roles: ["viewer"]})
+      alice = local_user!("alice", "correct horse battery", %{roles: ["viewer"]})
 
       assert Native.bootstrap_admin(%{username: "root", password: "pw", role: "admin"}) ==
                :exists
@@ -62,15 +64,18 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert Native.bootstrap_admin(%{username: "root", password: nil, role: "admin"}) == :exists
       assert Repo.aggregate(UserRecord, :count) == 1
       assert Repo.get_by(UserRecord, username: "root") == nil
-    end
 
-    test "a directory user counts as a user" do
+      # A directory user counts as a user.
+      Repo.delete!(alice)
       Repo.insert!(%UserRecord{username: "erin", source: "nas", roles: ["viewer"]})
 
       assert Native.bootstrap_admin(%{username: "root", password: "pw", role: "admin"}) ==
                :exists
+
+      assert Repo.get_by(UserRecord, username: "root") == nil
     end
 
+    @tag verifies: "users-bootstrap-needs"
     test "with no user yet, a password and a role are required" do
       assert Native.bootstrap_admin(%{username: "root", password: "", role: "admin"}) ==
                {:error, :no_password}
@@ -92,6 +97,7 @@ defmodule Macaw.Auth.Native.UsersTest do
   end
 
   describe "the users" do
+    @tag verifies: "users-list-get"
     test "list_users/0 is every user, by username; get_user/1 finds one as typed" do
       local_user!("carol", "correct horse battery")
       local_user!("alice", "correct horse battery")
@@ -103,6 +109,7 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert Native.get_user("not a name!") == nil
     end
 
+    @tag verifies: "users-disable-enable"
     test "disable_user/1 refuses sign-in; enable_user/1 lets it back" do
       local_user!("dave", "correct horse battery")
 
@@ -119,7 +126,8 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert Native.enable_user("nobody") == {:error, :not_found}
     end
 
-    test "set_password/3 replaces a local user's password and revokes their sessions" do
+    @tag verifies: "users-set-password"
+    test "set_password/3 replaces a local user's password and revokes their sessions; announce: false tells no page" do
       record = local_user!("frank", "correct horse battery")
       {:ok, token, _} = Auth.create_session(Native.to_user(record))
       :ok = Auth.subscribe(record.id)
@@ -129,18 +137,18 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert {:ok, _} = sign_in("frank", "a new password")
       assert Auth.fetch(token) == {:error, :invalid}
       assert_receive {:sessions_revoked, [_]}
-    end
 
-    test "set_password/3 with announce: false revokes without telling open pages" do
-      record = local_user!("gina", "correct horse battery")
-      {:ok, token, _} = Auth.create_session(Native.to_user(record))
-      :ok = Auth.subscribe(record.id)
+      # With announce: false, the session is revoked and no page is told.
+      gina = local_user!("gina", "correct horse battery")
+      {:ok, token, _} = Auth.create_session(Native.to_user(gina))
+      :ok = Auth.subscribe(gina.id)
 
       assert {:ok, _} = Native.set_password("gina", "a new password", announce: false)
       assert Auth.fetch(token) == {:error, :invalid}
       refute_receive {:sessions_revoked, _}, 50
     end
 
+    @tag verifies: "users-set-password-refused"
     test "set_password/3 refuses a directory user, an empty password and an unknown user" do
       Repo.insert!(%UserRecord{username: "erin", source: "nas"})
       local_user!("hank", "correct horse battery")
@@ -152,6 +160,7 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert Native.set_password("nobody", "a password") == {:error, :not_found}
     end
 
+    @tag verifies: "users-set-roles"
     test "set_roles/2 replaces a local user's roles; a directory user's are the directory's" do
       local_user!("ivy", "correct horse battery", %{roles: ["viewer"]})
       Repo.insert!(%UserRecord{username: "erin", source: "nas", roles: ["viewer"]})
@@ -167,6 +176,7 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert Native.set_roles("nobody", ["admin"]) == {:error, :not_found}
     end
 
+    @tag verifies: "users-admin-reset-quiet"
     test "admin_reset/2 with announce: false clears the factor and sessions, telling no page" do
       record = local_user!("jack", "correct horse battery")
       user = Native.to_user(record)
@@ -180,6 +190,107 @@ defmodule Macaw.Auth.Native.UsersTest do
       refute_receive {:sessions_revoked, _}, 50
       assert Native.to_user(Repo.get!(UserRecord, user.id)).second_factor == :none
       assert Native.recovery_codes_left(user) == 0
+    end
+  end
+
+  # Each section's own text, beside the hints inside it.
+  describe "the sections of spec 13" do
+    # Runs `fun` once, right after the first query on `table`: between the
+    # code under test's read and its write.
+    defp after_first_query(table, fun) do
+      id = make_ref()
+
+      :telemetry.attach(
+        id,
+        [:macaw, :auth, :test, :repo, :query],
+        fn _event, _measurements, %{source: source}, _config ->
+          if source == table do
+            :telemetry.detach(id)
+            fun.()
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(id) end)
+    end
+
+    @tag verifies: "auth-users-api"
+    test "users are named as sign-in matches them; local is the password source's; revocations say why" do
+      configure!(sealing_key: @key, sources: [%{type: :password, name: "office"}])
+      {:ok, kim} = Native.create_user(%{username: "Kim", password: "correct horse battery"})
+      assert kim.source == "office"
+
+      assert %UserRecord{username: "kim"} = Native.get_user("  KIM ")
+      assert {:ok, %UserRecord{roles: ["ops"]}} = Native.set_roles(" Kim", ["ops"])
+      assert {:ok, %UserRecord{disabled_at: %DateTime{}}} = Native.disable_user("KIM ")
+      assert {:ok, %UserRecord{disabled_at: nil}} = Native.enable_user(" kim")
+
+      # A row whose source isn't the configured password source's name is
+      # not local, even one named "local".
+      Repo.insert!(%UserRecord{username: "lee", source: "local", roles: ["viewer"]})
+      assert Native.set_password("lee", "a password") == {:error, :not_local}
+      assert Native.set_roles("lee", ["admin"]) == {:error, :not_local}
+
+      # set_password/3 revokes with reason :password_changed.
+      ref = make_ref()
+      parent = self()
+
+      :telemetry.attach(
+        "users-api-#{inspect(ref)}",
+        [:macaw_auth, :native, :session],
+        fn _name, _measurements, meta, _ -> send(parent, {ref, meta}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach("users-api-#{inspect(ref)}") end)
+      {:ok, _token, _} = Auth.create_session(Native.to_user(kim))
+      assert {:ok, _} = Native.set_password("kim", "another password", announce: false)
+      assert_received {^ref, %{event: :revoked, reason: :password_changed, user_id: id}}
+      assert id == kim.id
+    end
+
+    @tag verifies: "auth-users-bootstrap"
+    test "the first admin takes a display name and a password change; two first boots make one" do
+      assert {:ok, record} =
+               Native.bootstrap_admin(%{
+                 username: "root",
+                 password: "correct horse battery",
+                 role: "admin",
+                 display_name: "The Root",
+                 must_change_password: true
+               })
+
+      assert %UserRecord{display_name: "The Root", must_change_password: true} = record
+      Repo.delete!(record)
+
+      # Another boot makes "root" between this one's look and its insert:
+      # this one meets the unique index and answers :exists.
+      parent = self()
+
+      after_first_query("macaw_auth_users", fn ->
+        send(
+          parent,
+          {:other, Native.bootstrap_admin(%{username: "root", password: "pw a", role: "admin"})}
+        )
+      end)
+
+      assert Native.bootstrap_admin(%{username: "Root", password: "pw b", role: "admin"}) ==
+               :exists
+
+      assert_received {:other, {:ok, %UserRecord{username: "root"}}}
+      assert Repo.aggregate(UserRecord, :count) == 1
+      assert {:ok, _} = sign_in("root", "pw a")
+    end
+
+    @tag verifies: "auth-users-store"
+    test "the users and sessions are Ecto schemas on the configured repo; there is no Store behavior" do
+      assert Macaw.Auth.Native.Config.get().repo == Repo
+      assert UserRecord.__schema__(:source) == "macaw_auth_users"
+      assert Macaw.Auth.Native.SessionRecord.__schema__(:source) == "macaw_auth_sessions"
+      assert {:error, "repo: " <> _} = Macaw.Auth.Native.Config.parse([])
+      refute Code.ensure_loaded?(Macaw.Auth.Native.Store)
+      refute Code.ensure_loaded?(Macaw.Auth.Store)
     end
   end
 end

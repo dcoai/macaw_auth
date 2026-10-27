@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
   use Macaw.Auth.DataCase, async: false
 
+  alias Macaw.Auth.Native.{RecoveryCodeRecord, SessionRecord, UserRecord}
   alias Mix.Tasks.MacawAuth.Gen.Migration
 
   setup do
@@ -16,8 +17,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
     %{dir: dir}
   end
 
-  test "writes the three migrations, in order, naming the repo, and refuses a second time",
-       %{dir: dir} do
+  @tag verifies: "migrations-write"
+  test "writes the three migrations, in order, naming the repo", %{dir: dir} do
     [users, sessions, factor] =
       Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
 
@@ -30,7 +31,13 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
     assert File.read!(sessions) =~ "defmodule MyApp.Repo.Migrations.CreateMacawAuthSessions do"
     assert File.read!(factor) =~ "defmodule MyApp.Repo.Migrations.AddMacawAuthSecondFactor do"
 
-    for _ <- 1..3, do: assert_received({:mix_shell, :info, ["* creating " <> _]})
+    for path <- [users, sessions, factor],
+        do: assert_received({:mix_shell, :info, ["* creating " <> ^path]})
+  end
+
+  @tag verifies: "migrations-refuse-again"
+  test "refuses a second time, writing nothing", %{dir: dir} do
+    Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
 
     assert_raise Mix.Error, ~r/already has the macaw_auth migrations/, fn ->
       Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
@@ -39,7 +46,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
     assert length(File.ls!(dir)) == 3
   end
 
-  test "a host with the users migration gets only the others", %{dir: dir} do
+  @tag verifies: "migrations-only-missing"
+  test "a host with some of the migrations gets only the others", %{dir: dir} do
     [users, first, second] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
     File.rm!(first)
     File.rm!(second)
@@ -48,19 +56,18 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
     assert Path.basename(sessions) =~ ~r/_create_macaw_auth_sessions\.exs$/
     assert Path.basename(factor) =~ ~r/_add_macaw_auth_second_factor\.exs$/
     assert Path.wildcard(Path.join(dir, "*_create_macaw_auth_users.exs")) == [users]
-  end
 
-  test "a host with the users and sessions migrations gets only the second factor's",
-       %{dir: dir} do
-    [users, sessions, factor] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+    # With the users and sessions migrations, only the second factor's.
     File.rm!(factor)
 
     assert [again] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
     assert Path.basename(again) =~ ~r/_add_macaw_auth_second_factor\.exs$/
     assert Path.basename(again) > Path.basename(sessions)
     assert Path.wildcard(Path.join(dir, "*_create_macaw_auth_users.exs")) == [users]
+    assert Path.wildcard(Path.join(dir, "*_create_macaw_auth_sessions.exs")) == [sessions]
   end
 
+  @tag verifies: "migrations-configured-repo"
   test "takes the configured repo when none is given", %{dir: dir} do
     [users, sessions, _factor] = Migration.run(["--migrations-path", dir])
 
@@ -69,6 +76,34 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
 
     assert File.read!(sessions) =~
              "defmodule Macaw.Auth.Test.Repo.Migrations.CreateMacawAuthSessions do"
+  end
+
+  @tag verifies: "migrations-after-existing"
+  test "a migration dated ahead: the files come after it, one second apart", %{dir: dir} do
+    File.mkdir_p!(dir)
+    ahead = DateTime.add(DateTime.utc_now(), 3600, :second)
+    File.write!(Path.join(dir, "#{version(ahead)}_the_hosts_own.exs"), "")
+
+    versions =
+      ["--repo", "MyApp.Repo", "--migrations-path", dir]
+      |> Migration.run()
+      |> Enum.map(&seconds/1)
+
+    assert versions == Enum.map(1..3, &(DateTime.to_unix(ahead) + &1))
+  end
+
+  defp version(%DateTime{} = at), do: Calendar.strftime(at, "%Y%m%d%H%M%S")
+
+  defp seconds(path) do
+    <<v::binary-14, "_", _::binary>> = Path.basename(path)
+
+    <<y::binary-4, m::binary-2, d::binary-2, hh::binary-2, mm::binary-2, ss::binary-2>> = v
+
+    [y, m, d, hh, mm, ss]
+    |> Enum.map(&String.to_integer/1)
+    |> then(fn [y, m, d, hh, mm, ss] ->
+      DateTime.new!(Date.new!(y, m, d), Time.new!(hh, mm, ss)) |> DateTime.to_unix()
+    end)
   end
 
   defp columns(table) do
@@ -84,6 +119,7 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
   end
 
   # test_helper ran the generated migrations against SQLite: these are their tables.
+  @tag verifies: "migrations-tables"
   test "the generated migrations made the tables the schemas read" do
     assert columns("macaw_auth_users") ==
              Enum.sort(~w(id username display_name hashed_password source roles disabled_at
@@ -112,5 +148,143 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
              Repo.query!(
                "SELECT \"table\", on_delete FROM pragma_foreign_key_list('macaw_auth_recovery_codes')"
              ).rows
+  end
+
+  # Each section's own text, beside the hints inside it.
+  describe "the sections of spec 12" do
+    @tag verifies: "auth-migrations"
+    test "the migrations the tests ran are the ones the task writes", %{dir: dir} do
+      shipped = Path.expand("../../../../tmp/test/migrations", __DIR__)
+      written = Migration.run(["--repo", "Macaw.Auth.Test.Repo", "--migrations-path", dir])
+
+      body = fn path -> path |> Path.basename() |> String.slice(15..-1//1) end
+      ran = shipped |> File.ls!() |> Enum.sort()
+      assert Enum.map(ran, &String.slice(&1, 15..-1//1)) == Enum.map(written, body)
+
+      for {name, path} <- Enum.zip(ran, written) do
+        assert File.read!(Path.join(shipped, name)) == File.read!(path)
+      end
+
+      # Plain DDL the host reads: Ecto.Migration, no call into this library.
+      for path <- written do
+        assert File.read!(path) =~ "use Ecto.Migration"
+        refute File.read!(path) =~ ~r/Macaw\.Auth\.Native\.\w+\./
+      end
+    end
+
+    @tag verifies: "auth-migrations-options"
+    test "the default path is made when missing; with no repo, or an unknown option, the task stops",
+         %{dir: dir} do
+      File.mkdir_p!(dir)
+
+      written = File.cd!(dir, fn -> Migration.run(["--repo", "MyApp.Repo"]) end)
+      assert length(written) == 3
+      assert length(File.ls!(Path.join(dir, "priv/repo/migrations"))) == 3
+
+      assert_raise Mix.Error, ~r/unknown option: .*--frob/, fn ->
+        Migration.run(["--frob", "--migrations-path", Path.join(dir, "other")])
+      end
+
+      refute File.exists?(Path.join(dir, "other"))
+
+      configured = Application.fetch_env!(:macaw_auth, Macaw.Auth.Native)
+      on_exit(fn -> Application.put_env(:macaw_auth, Macaw.Auth.Native, configured) end)
+      Application.put_env(:macaw_auth, Macaw.Auth.Native, Keyword.delete(configured, :repo))
+
+      assert_raise Mix.Error,
+                   "no repo: pass --repo MyApp.Repo, or configure " <>
+                     "config :macaw_auth, Macaw.Auth.Native, repo: MyApp.Repo",
+                   fn -> Migration.run(["--migrations-path", Path.join(dir, "none")]) end
+    end
+
+    defp column(table, name) do
+      Repo.query!(
+        "SELECT \"notnull\", dflt_value FROM pragma_table_info('#{table}') WHERE name = ?",
+        [name]
+      ).rows
+    end
+
+    @tag verifies: "auth-migrations-files"
+    test "the columns' nulls and defaults, the user index, and arrays on SQLite", %{dir: dir} do
+      not_null = fn table, names ->
+        for name <- names, do: assert([[1, _]] = column(table, name), "#{table}.#{name}")
+      end
+
+      not_null.("macaw_auth_users", ~w(username source roles must_change_password extra))
+      assert column("macaw_auth_users", "must_change_password") == [[1, "false"]]
+      assert [[0, nil]] = column("macaw_auth_users", "hashed_password")
+
+      not_null.(
+        "macaw_auth_sessions",
+        ~w(user_id token_hash second_factor_passed completed_steps last_used_at)
+      )
+
+      assert column("macaw_auth_sessions", "second_factor_passed") == [[1, "true"]]
+      not_null.("macaw_auth_recovery_codes", ~w(user_id code_hash))
+
+      assert Repo.query!(
+               "SELECT 1 FROM pragma_index_list('macaw_auth_sessions') WHERE name LIKE '%user_id%'"
+             ).rows == [[1]]
+
+      # The arrays are {:array, :string}: JSON text here, a list again when read.
+      [users, sessions, _] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+      assert File.read!(users) =~ "add :roles, {:array, :string}, null: false"
+      assert File.read!(sessions) =~ "add :completed_steps, {:array, :string}, null: false"
+
+      # Each table is its schema's, column for column.
+      for schema <- [UserRecord, SessionRecord, RecoveryCodeRecord] do
+        fields = Enum.map(schema.__schema__(:fields), &Atom.to_string/1)
+        assert Enum.sort(fields) == columns(schema.__schema__(:source)), inspect(schema)
+      end
+
+      record = local_user!("ruth", "correct horse battery", %{roles: ["admin", "ops"]})
+      assert Repo.get!(UserRecord, record.id).roles == ["admin", "ops"]
+
+      assert [[~s(["admin","ops"])]] =
+               Repo.query!("SELECT roles FROM macaw_auth_users WHERE username = 'ruth'").rows
+    end
+
+    @tag verifies: "auth-migrations-missing"
+    test "any *_<name>.exs counts as present; the refusal names the three", %{dir: dir} do
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, "hosts_create_macaw_auth_users.exs"), "")
+
+      assert [sessions, factor] =
+               Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+
+      assert sessions =~ "_create_macaw_auth_sessions.exs"
+      assert factor =~ "_add_macaw_auth_second_factor.exs"
+
+      assert_raise Mix.Error,
+                   "#{dir} already has the macaw_auth migrations " <>
+                     "(create_macaw_auth_users, create_macaw_auth_sessions, " <>
+                     "add_macaw_auth_second_factor)",
+                   fn -> Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir]) end
+    end
+
+    @tag verifies: "auth-migrations-order"
+    test "versions are UTC seconds from now, one apart; a name that isn't a timestamp is ignored",
+         %{dir: dir} do
+      File.mkdir_p!(dir)
+      # Month 13: not a valid timestamp, so not a migration to come after.
+      File.write!(Path.join(dir, "20991399000000_not_a_version.exs"), "")
+
+      before = DateTime.to_unix(DateTime.utc_now())
+      [first, second, third] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+      later = DateTime.to_unix(DateTime.utc_now())
+
+      assert seconds(first) in before..later
+      assert seconds(second) == seconds(first) + 1
+      assert seconds(third) == seconds(first) + 2
+
+      # A second run within the same moment still runs after what is there.
+      File.rm!(second)
+      File.rm!(third)
+      before = DateTime.to_unix(DateTime.utc_now())
+      [again, last] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+      later = DateTime.to_unix(DateTime.utc_now())
+      assert seconds(again) in max(seconds(first) + 1, before)..max(seconds(first) + 1, later)
+      assert seconds(last) == seconds(again) + 1
+    end
   end
 end

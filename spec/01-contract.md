@@ -1,5 +1,7 @@
 # 01 — The contract {#auth-contract}
 
+<!-- surfex: class orientation -->
+
 What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Macaw.Auth.Backend`, what a backend implements; `Macaw.Auth.Authorizer`, what the app implements to decide what a user may do (§9); and the two structs every backend reports, `Macaw.Auth.User` and `Macaw.Auth.Session`. The plugs ([02](02-plugs.md)) and the hooks ([03](03-live.md)) are built on these.
 
 ## 1. The facade {#auth-contract-facade}

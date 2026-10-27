@@ -106,6 +106,10 @@ revoke_all of a user with a session, through set_password/3 and admin_reset/2: t
 sessions made at 0, three at 10, at 20 and another user's at 30 list as the one at 20, the three tied in descending id order, then the one at 0
 ```
 
+```test:sessions-list-junk
+list_sessions("nope") and list_sessions of an unused UUID are both []
+```
+
 ```test:sessions-revoke
 revoking a's id gives {user_id, [a]} and again {nil, []}; revoking the user's except c gives {user_id, [b]}; except: "not-an-id" revokes c; then nothing is left, {user_id, []}; no subscriber hears anything from the backend itself
 ```

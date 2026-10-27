@@ -108,13 +108,14 @@ defmodule Macaw.Auth.Test.MemoryBackend do
     given = :crypto.hash(:sha256, password)
 
     case :ets.lookup(@users, name) do
-      [{_, %User{disabled: true}, _}] ->
-        {:error, :disabled}
-
       [{_, user, hash}] ->
-        if Plug.Crypto.secure_compare(hash, given),
-          do: {:ok, user},
-          else: {:error, :invalid_credentials}
+        # A disabled user is told so only with the right password, so
+        # disabled accounts can't be probed (spec 01 §2.1).
+        cond do
+          not Plug.Crypto.secure_compare(hash, given) -> {:error, :invalid_credentials}
+          user.disabled -> {:error, :disabled}
+          true -> {:ok, user}
+        end
 
       [] ->
         # The same work as a wrong password, so an unknown user takes the same time.

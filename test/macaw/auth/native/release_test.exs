@@ -30,7 +30,12 @@ defmodule Macaw.Auth.Native.ReleaseTest do
       do: System.put_env(prefix <> "_CTL_PASSWORD", password),
       else: System.delete_env(prefix <> "_CTL_PASSWORD")
 
-    capture_io(fn -> apply(Release, fun, [prefix]) end)
+    capture_io(fn ->
+      case fun do
+        :bootstrap -> Release.bootstrap(prefix)
+        :user -> Release.user(prefix)
+      end
+    end)
     |> String.split("\n", trim: true)
     |> Enum.map(&JSON.decode!/1)
   end
@@ -41,6 +46,7 @@ defmodule Macaw.Auth.Native.ReleaseTest do
     do: Native.authenticate(%{username: username, password: password})
 
   describe "bootstrap/1" do
+    @tag verifies: "users-release-bootstrap"
     test "makes the first admin, then answers that a user exists", %{prefix: prefix} do
       assert release(:bootstrap, prefix, ["Root", "--role", "admin"], "first pw") ==
                [%{"ok" => true, "created" => "root", "role" => "admin"}]
@@ -57,6 +63,7 @@ defmodule Macaw.Auth.Native.ReleaseTest do
   end
 
   describe "user/1" do
+    @tag verifies: "users-release-commands"
     test "every command, as the mix task runs it", %{prefix: prefix} do
       assert release(:user, prefix, ["add", "alice", "--role", "admin"], "first pw") ==
                [%{"ok" => true, "added" => "alice", "roles" => ["admin"]}]
@@ -138,7 +145,9 @@ defmodule Macaw.Auth.Native.ReleaseTest do
 
     defp objects(out), do: out |> String.split("\n", trim: true) |> Enum.map(&JSON.decode!/1)
 
-    test "bootstrap/0 makes the first admin once, then is a no-op", c do
+    @tag verifies: "users-release-fresh-vm"
+    test "bootstrap/0 makes the first admin once; user/0 adds and lists, the password only in RT_CTL_PASSWORD",
+         c do
       code = c.configured <> "Macaw.Auth.Native.Release.bootstrap()"
       env = [{"RT_CTL_ARGS", ~s(["root", "--role", "admin"])}, {"RT_CTL_PASSWORD", "first pw"}]
 
@@ -150,9 +159,7 @@ defmodule Macaw.Auth.Native.ReleaseTest do
       assert objects(out) == [
                %{"ok" => true, "created" => nil, "reason" => "a user already exists"}
              ]
-    end
 
-    test "user/0 adds and lists, the password only ever in RT_CTL_PASSWORD", c do
       code = c.configured <> "Macaw.Auth.Native.Release.user()"
 
       env = [
@@ -165,10 +172,16 @@ defmodule Macaw.Auth.Native.ReleaseTest do
       refute out =~ "correct horse"
 
       assert {out, "", 0} = eval(c.dir, code, [{"RT_CTL_ARGS", ~s(["list"])}])
-      assert [%{"username" => "alice", "roles" => ["admin"], "source" => "local"}] = objects(out)
+
+      assert [
+               %{"username" => "alice", "roles" => ["admin"], "source" => "local"},
+               %{"username" => "root"}
+             ] = objects(out)
     end
 
-    test "a user's error is one JSON line on stderr and exit status 1, no stack trace", c do
+    @tag verifies: "users-release-fresh-vm-errors"
+    test "a user's error, malformed arguments and a missing env_prefix: one stderr line, exit status 1",
+         c do
       code = c.configured <> "Macaw.Auth.Native.Release.user()"
 
       for {args, error} <- [
@@ -188,18 +201,14 @@ defmodule Macaw.Auth.Native.ReleaseTest do
       assert {"", err, 1} = eval(c.dir, code, env)
       assert err =~ "never read from the command line"
       refute err =~ "hunter2"
-    end
 
-    test "malformed arguments fail as macaw_host's protocol says", c do
-      code = c.configured <> "Macaw.Auth.Native.Release.user()"
-
+      # Malformed arguments fail as macaw_host's protocol says.
       for args <- ["not json", "[1, 2]"] do
         assert {"", "RT_CTL_ARGS must be a JSON array of strings\n", 1} =
                  eval(c.dir, code, [{"RT_CTL_ARGS", args}])
       end
-    end
 
-    test "without a configured env_prefix the entry points refuse, naming the setting", c do
+      # Without a configured env_prefix the entry points refuse, naming the setting.
       for fun <- ["bootstrap", "user"] do
         code = c.prelude <> "Macaw.Auth.Native.Release.#{fun}()"
 
@@ -212,6 +221,63 @@ defmodule Macaw.Auth.Native.ReleaseTest do
                    "config :macaw_auth, Macaw.Auth.Native.Release, env_prefix: is not set"
                }
       end
+    end
+  end
+
+  # The section's own text, beside the hints inside it.
+  describe "the sections of spec 13" do
+    @describetag :tmp_dir
+
+    @tag verifies: "auth-users-release"
+    test "bootstrap's own usage; the prefix given; revoking without telling a page", c do
+      for args <- [["root"], ["root", "--role", "-x"]] do
+        code = "Macaw.Auth.Native.Release.bootstrap(#{inspect(c.prefix)})"
+
+        paths = Path.wildcard(Path.join(Mix.Project.build_path(), "lib/*/ebin"))
+        argv = Enum.flat_map(paths, &["-pa", &1]) ++ ["-e", code]
+        err = Path.join(c.tmp_dir, "stderr")
+
+        {out, 1} =
+          System.cmd("sh", ["-c", ~s(elixir "$@" 2>"$ERR"), "sh" | argv],
+            env: [{"ERR", err}, {c.prefix <> "_CTL_ARGS", JSON.encode!(args)}]
+          )
+
+        assert out == ""
+
+        assert JSON.decode!(File.read!(err)) == %{
+                 "ok" => false,
+                 "error" => "usage: bootstrap NAME --role R"
+               }
+      end
+
+      # user/1 with the prefix given, here, apart from the app's node: the
+      # password's revocation tells no open page.
+      record = local_user!("alice", "first pw")
+      {:ok, token, _} = Native.create_session(Native.to_user(record), [])
+      :ok = Macaw.Auth.subscribe(record.id)
+
+      assert release(:user, c.prefix, ["password", "alice"], "second pw") ==
+               [%{"ok" => true, "password_set" => "alice"}]
+
+      assert Native.fetch_session(token, []) == {:error, :invalid}
+      refute_receive {:sessions_revoked, _}, 50
+
+      # bootstrap/0 and user/0 read the prefix from the configuration.
+      on_exit(fn -> Application.delete_env(:macaw_auth, Release) end)
+      Application.put_env(:macaw_auth, Release, env_prefix: c.prefix)
+      Repo.delete_all(UserRecord)
+      System.put_env(c.prefix <> "_CTL_ARGS", ~s(["root", "--role", "admin"]))
+      System.put_env(c.prefix <> "_CTL_PASSWORD", "root pw")
+
+      assert JSON.decode!(capture_io(fn -> Release.bootstrap() end)) ==
+               %{"ok" => true, "created" => "root", "role" => "admin"}
+
+      System.put_env(c.prefix <> "_CTL_ARGS", ~s(["disable", "root"]))
+
+      assert JSON.decode!(capture_io(fn -> Release.user() end)) == %{
+               "ok" => true,
+               "disabled" => "root"
+             }
     end
   end
 end

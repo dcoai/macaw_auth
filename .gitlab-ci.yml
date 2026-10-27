@@ -76,3 +76,6 @@ test:
     MACAW_AUTH_LDAP_HOST: ldap
   script:
     - mix test
+    # Spec, tests and code aligned (macaw_compose spec/00 §4.1): the status reads this
+    # job's test run as evidence, so it runs right after it, in the same job.
+    - mix surfex.status

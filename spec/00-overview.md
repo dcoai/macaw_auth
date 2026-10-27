@@ -2,6 +2,8 @@
 
 ## 1. What macaw_auth holds {#auth-holds}
 
+<!-- surfex: class orientation -->
+
 Eight projects carried their own authentication, in three lineages, about 17,600 lines of it, and the copies had drifted on security: a DN-escaping bug fixed in one lineage and live in another, four projects without login throttling, two storing session tokens in the clear, two unable to revoke an open LiveView (macaw_compose#32). `macaw_auth` implements it once, grown from the exio and macaw lineage, which carried every fix the others lacked. It holds:
 - **the contract** an app uses, the same whatever backend is behind it: `Macaw.Auth` (sign-in, sessions, steps, paths, revocation that reaches open pages, the viewer, authorization), the `Macaw.Auth.Backend` behavior, the `Macaw.Auth.Authorizer` behavior the app implements, and the `Macaw.Auth.User` and `Macaw.Auth.Session` structs ([01](01-contract.md));
 - **the request side:** `Macaw.Auth.Plug`, plugs for a Phoenix router ([02](02-plugs.md));
@@ -10,6 +12,8 @@ Eight projects carried their own authentication, in three lineages, about 17,600
 - **the native backend,** `Macaw.Auth.Native`, on the host's Ecto repo: its configuration and sign-in ([05](05-native-config.md)), a chain of sources with local passwords and just-in-time provisioning ([06](06-native-sources.md)), LDAP over OTP's `:eldap` ([07](07-native-ldap.md)), bcrypt or argon2 ([08](08-native-hashers.md)), hashed sessions ([09](09-native-sessions.md)), the sign-in throttle ([10](10-native-throttle.md)), TOTP and recovery codes ([11](11-native-totp.md)), the generator of its migrations ([12](12-native-migrations.md)), and administering its users: the first admin at boot, `mix macaw_auth.user`, and the same commands as release entry points for an app's `<app>-ctl` ([13](13-native-users.md)).
 
 ## 2. A contract with backends behind it {#auth-shape}
+
+<!-- surfex: class orientation -->
 
 A consumer needs only a narrow contract: who the current user is, plugs and hooks that guard requests and pages, and a session's lifecycle (sign in, sign out, list, revoke one or all, with the push to open pages). Everything else (storage, LDAP binding, TOTP sealing, the throttle, the hasher) is a backend's own, so the contract never forces a backend to reimplement the native feature set (macaw_compose#32, owner amendment of 2026-10-26).
 
@@ -45,6 +49,8 @@ It is released by git tag: v0.1.0; v0.1.1, which added `Macaw.Auth.announce_revo
 
 ## 4. The boundary with Macaw composition {#auth-boundary}
 
+<!-- surfex: class orientation -->
+
 Macaw's composition libraries (`macaw_layers`, `macaw_data`, `macaw_compose`, `macaw_live`) never depend on `macaw_auth`, and an identity or access system stays a non-goal of composition: the viewer arrives from the host ([macaw_compose 00 §2](https://gitlab.conet.yarina.org/dco-tek/macaw_compose/-/blob/main/spec/00-overview.md#overview-goals), goal 3). `macaw_auth` is what a host may get the viewer from: `Macaw.Auth.viewer/1` turns the signed-in user into a Macaw page's viewer, identity and roles only, never display preferences, which are state ([01 §8](01-contract.md#auth-viewer)). It sits with `macaw_plug` and `macaw_host` among the family's host libraries ([macaw_compose 00 §4](https://gitlab.conet.yarina.org/dco-tek/macaw_compose/-/blob/main/spec/00-overview.md#overview-packaging)).
 
 ## 5. Defaults are closed {#auth-closed}
@@ -62,6 +68,8 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 - **the remember cookie is `secure` under https,** with no setting to turn it off, and is set only when a sign-in asks for it ([02 §10](02-plugs.md#auth-plug-remember)).
 
 ## 6. Known gaps {#auth-gaps}
+
+<!-- surfex: class orientation -->
 
 Found while writing this spec from the code (v0.1.1); each section states what the code does, and these are open for the owner's decision. The bugs and smaller faults found then were fixed in v0.2.0 (macaw_compose#74).
 
