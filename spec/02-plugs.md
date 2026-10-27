@@ -75,16 +75,28 @@ a signed-out GET to /reports?year=2026 remembers "/reports?year=2026"; a signed-
 
 ## 4. Requiring a role {#auth-plug-require-role}
 
-`Macaw.Auth.Plug.require_role/2` takes a list of role names and passes when **the current user has any of them** (membership only: what a role allows is the app's to decide). Otherwise, signed in or signed out:
-- **an error flash, `"You are not allowed to do that."`,** when the pipeline ran `fetch_flash` (the conn has a `:flash` assign); without it, no message;
-- **a redirect to `path(:home)`,** halted. Not a bare 403: the user sees where they are and why, as exio does (macaw_compose#51).
+`Macaw.Auth.Plug.require_role/2` takes a list of role names and passes when **the current user has any of them** (membership only: what a role allows is the app's to decide). Otherwise:
+- **Signed out** (no `:current_user`): a redirect to `path(:sign_in)`, halted, remembering where a `GET` was going (§3.1), as `require_authenticated/2` does, so `require_role/2` alone guards a page. No flash: nothing was refused yet.
+- **Signed in without any of them,** refused: an error flash, `"You are not allowed to do that."`, when the pipeline ran `fetch_flash` (the conn has a `:flash` assign; without it, no message), and **a redirect to `path(:home)`,** halted, remembering nothing. Not a bare 403: the user sees where they are and why, as exio does (macaw_compose#51).
 
 ```test:plug-require-role
 an admin passes require_role(["admin", "owner"]); a viewer, after fetch_flash, is halted with 302 to home and the error flash "You are not allowed to do that."
 ```
 
 ```test:plug-require-role-no-flash
-without fetch_flash, a viewer is still sent home, and no :flash is assigned; a signed-out request is sent home too
+without fetch_flash, a viewer is still sent home, and no :flash is assigned
+```
+
+```test:plug-require-role-signed-out
+a signed-out GET to /admin?tab=users through require_role(["admin"]), after fetch_flash, is halted with 302 to "/login", "/admin?tab=users" remembered and no error flash
+```
+
+```test:plug-require-role-signed-out-post
+a signed-out POST to /admin through require_role(["admin"]) is halted with 302 to "/login", remembering nothing
+```
+
+```test:plug-require-role-signed-in
+a signed-in viewer's GET to /admin through require_role(["admin"]), after fetch_flash, is halted with 302 to home and the error flash, and no return path is remembered
 ```
 
 ### 4.1 Authorizing {#auth-plug-authorize}
@@ -98,7 +110,7 @@ plug :authorize, {:edit, resource: &MyAppWeb.Posts.post/1}
 
 - **The options** are an action (an atom), or `{action, opts}` where `opts` takes only `:resource`; any other key raises (`Keyword.validate!/2`).
 - **The resource** is what the `:resource` function gives of the conn, called with it, else nil. It is a remote capture (`&Mod.fun/1`), so a router's or controller's plug options compile. It is called only for a signed-in request.
-- **Signed out** (no `:current_user`): a redirect to `path(:sign_in)`, halted, remembering where a `GET` was going (§3.1), as `require_authenticated/2` does. Unlike `require_role/2`, which sends a signed-out request home.
+- **Signed out** (no `:current_user`): a redirect to `path(:sign_in)`, halted, remembering where a `GET` was going (§3.1), as `require_authenticated/2` and `require_role/2` do.
 - **Refused** (the authorizer's `false`, or no authorizer configured): exactly `require_role/2`'s refusal (§4): the error flash `"You are not allowed to do that."` when the pipeline ran `fetch_flash`, and a redirect to `path(:home)`, halted.
 - **Allowed:** the conn, untouched.
 - It neither checks nor sends a session owing a step, as `require_role/2` doesn't: that is `require_authenticated/2`'s, earlier in the pipeline (§3).

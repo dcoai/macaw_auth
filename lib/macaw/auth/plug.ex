@@ -174,23 +174,29 @@ defmodule Macaw.Auth.Plug do
 
   @doc """
   Sends a user with none of `roles` home, with an error flash when the
-  pipeline ran `fetch_flash` (without it, home with no message). What a
-  role allows is the app's to decide; this only checks membership.
+  pipeline ran `fetch_flash` (without it, home with no message). A
+  signed-out visitor is sent to sign in instead, remembering where a `GET`
+  was going, as `require_authenticated/2` does. What a role allows is the
+  app's to decide; this only checks membership.
   """
   def require_role(conn, roles) when is_list(roles) do
-    user = conn.assigns[:current_user]
+    case conn.assigns[:current_user] do
+      nil ->
+        conn |> remember_return() |> redirect(Auth.path(:sign_in))
 
-    if user && Enum.any?(user.roles, &(&1 in roles)),
-      do: conn,
-      else: refuse(conn)
+      user ->
+        if Enum.any?(user.roles, &(&1 in roles)),
+          do: conn,
+          else: refuse(conn)
+    end
   end
 
   @doc """
   Asks the app's authorizer (`Macaw.Auth.authorize/3`) whether the current
   user may do `action`, and refuses as `require_role/2` does: home, with an
   error flash when the pipeline ran `fetch_flash`. A signed-out visitor is
-  sent to sign in instead, remembering where a `GET` was going. With no
-  authorizer configured, every request is refused.
+  sent to sign in, as `require_role/2` sends one, remembering where a `GET`
+  was going. With no authorizer configured, every request is refused.
 
       plug :authorize, :manage
       plug :authorize, {:edit, resource: &MyAppWeb.Posts.post/1}

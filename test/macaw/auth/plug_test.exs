@@ -114,9 +114,42 @@ defmodule Macaw.Auth.PlugTest do
     conn = signed_in(viewer, "/admin") |> AuthPlug.require_role(["admin"])
     assert conn.halted and location(conn) == "/home"
     refute Map.has_key?(conn.assigns, :flash)
+  end
 
-    signed_out = request("/admin") |> AuthPlug.require_role(["admin"])
-    assert signed_out.halted and location(signed_out) == "/home"
+  @tag verifies: "plug-require-role-signed-out"
+  test "require_role alone sends a signed-out GET to sign in, remembering where it was going" do
+    conn =
+      request("/admin?tab=users")
+      |> Phoenix.Controller.fetch_flash([])
+      |> AuthPlug.require_role(["admin"])
+
+    assert conn.halted and conn.status == 302
+    assert location(conn) == "/login"
+    assert get_session(conn, "macaw_auth_return_to") == "/admin?tab=users"
+    assert Phoenix.Flash.get(conn.assigns.flash, :error) == nil
+  end
+
+  @tag verifies: "plug-require-role-signed-out-post"
+  test "require_role sends a signed-out POST to sign in without remembering it" do
+    conn = request("/admin", %{}, :post) |> AuthPlug.require_role(["admin"])
+    assert conn.halted and conn.status == 302
+    assert location(conn) == "/login"
+    assert get_session(conn, "macaw_auth_return_to") == nil
+  end
+
+  @tag verifies: "plug-require-role-signed-in"
+  test "require_role still sends a signed-in user without the role home, remembering nothing" do
+    {viewer, _} = Mem.user!(%{roles: ["viewer"]})
+
+    conn =
+      signed_in(viewer, "/admin")
+      |> Phoenix.Controller.fetch_flash([])
+      |> AuthPlug.require_role(["admin"])
+
+    assert conn.halted and conn.status == 302
+    assert location(conn) == "/home"
+    assert Phoenix.Flash.get(conn.assigns.flash, :error) == "You are not allowed to do that."
+    assert get_session(conn, "macaw_auth_return_to") == nil
   end
 
   @tag verifies: "plug-log-in"
@@ -741,9 +774,29 @@ defmodule Macaw.Auth.PlugTest do
         assert location(conn) == "/home"
       end
 
-      conn = request("/admin") |> Phoenix.Controller.fetch_flash([]) |> AuthPlug.require_role([])
+      {viewer, _} = Mem.user!(%{roles: ["viewer"]})
+
+      conn =
+        signed_in(viewer, "/admin")
+        |> Phoenix.Controller.fetch_flash([])
+        |> AuthPlug.require_role([])
+
       assert conn.status == 302 and location(conn) == "/home"
       assert Phoenix.Flash.get(conn.assigns.flash, :error) == "You are not allowed to do that."
+
+      # Signed out, it is not a refusal: to sign in, as require_authenticated sends it.
+      for method <- [:get, :post] do
+        conn =
+          request("/admin?tab=users", %{}, method)
+          |> Phoenix.Controller.fetch_flash([])
+          |> AuthPlug.require_role(["admin"])
+
+        assert conn.halted and conn.status == 302 and location(conn) == "/login"
+        assert Phoenix.Flash.get(conn.assigns.flash, :error) == nil
+
+        assert get_session(conn, "macaw_auth_return_to") ==
+                 if(method == :get, do: "/admin?tab=users")
+      end
     end
 
     @tag verifies: "auth-plug-authorize"
