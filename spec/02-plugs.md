@@ -19,7 +19,7 @@ end
 
 - **`fetch_session` comes first:** the token is kept in the session.
 - **`Macaw.Plug.ClientIp` runs before these,** so a session records, and the throttle counts, the client's address, not a proxy's ([macaw_plug 01 §4](https://gitlab.conet.yarina.org/dco-tek/macaw_plug/-/blob/main/spec/01-client-ip.md#plug-client-ip-call)).
-- **`fetch_flash` runs before `require_role/2`,** or its refusal goes home without saying why (§4).
+- **`fetch_flash` runs before `require_role/2` and `authorize/2`,** or their refusal goes home without saying why (§4).
 
 ## 1. The session keys {#auth-plug-keys}
 
@@ -85,6 +85,43 @@ an admin passes require_role(["admin", "owner"]); a viewer, after fetch_flash, i
 
 ```test:plug-require-role-no-flash
 without fetch_flash, a viewer is still sent home, and no :flash is assigned; a signed-out request is sent home too
+```
+
+### 4.1 Authorizing {#auth-plug-authorize}
+
+`Macaw.Auth.Plug.authorize/2` asks the app's authorizer, through `Macaw.Auth.authorize/3` ([01 §9](01-contract.md#auth-authorize)), whether the current user may do an action:
+
+```elixir
+plug :authorize, :manage
+plug :authorize, {:edit, resource: &MyAppWeb.Posts.post/1}
+```
+
+- **The options** are an action (an atom), or `{action, opts}` where `opts` takes only `:resource`; any other key raises (`Keyword.validate!/2`).
+- **The resource** is what the `:resource` function gives of the conn, called with it, else nil. It is a remote capture (`&Mod.fun/1`), so a router's or controller's plug options compile. It is called only for a signed-in request.
+- **Signed out** (no `:current_user`): a redirect to `path(:sign_in)`, halted, remembering where a `GET` was going (§3.1), as `require_authenticated/2` does. Unlike `require_role/2`, which sends a signed-out request home.
+- **Refused** (the authorizer's `false`, or no authorizer configured): exactly `require_role/2`'s refusal (§4): the error flash `"You are not allowed to do that."` when the pipeline ran `fetch_flash`, and a redirect to `path(:home)`, halted.
+- **Allowed:** the conn, untouched.
+- It neither checks nor sends a session owing a step, as `require_role/2` doesn't: that is `require_authenticated/2`'s, earlier in the pipeline (§3).
+- **An authorizer that raises** crashes the request.
+
+```test:plug-authorize-closed
+with no :authorizer configured, an admin's request through authorize(:manage), after fetch_flash, is halted with 302 to home and the error flash "You are not allowed to do that."
+```
+
+```test:plug-authorize
+with a test authorizer, an admin passes authorize(:manage); a viewer is halted to home with the error flash, and without fetch_flash to home with no :flash assigned
+```
+
+```test:plug-authorize-resource
+authorize({:edit, resource: &Authorizer.post/1}) passes the post's owner and refuses another user; authorize(:edit) asks about nil and refuses
+```
+
+```test:plug-authorize-signed-out
+a signed-out GET through authorize(:manage) is halted to "/login", its path and query remembered
+```
+
+```test:plug-authorize-raises
+an authorizer that raises makes authorize/2 raise the same exception
 ```
 
 ## 5. Checking credentials {#auth-plug-authenticate}

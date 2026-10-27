@@ -6,7 +6,8 @@ Authentication for Phoenix hosts, implemented once for the Macaw family's host a
 |---|---|
 | `Macaw.Auth` | the contract: authenticate, sessions, steps, revocation that reaches open pages, `viewer/1` |
 | `Macaw.Auth.Backend` | what a backend implements: who someone is, and their sessions |
-| `Macaw.Auth.Plug` | plugs for a Phoenix router: fetch the user, require sign-in or a role, sign in and out, step through second factor and password change |
+| `Macaw.Auth.Authorizer` | what the app implements: what a user may do (`authorize/3`); none configured, nothing is allowed |
+| `Macaw.Auth.Plug` | plugs for a Phoenix router: fetch the user, require sign-in or a role, authorize, sign in and out, step through second factor and password change |
 | `Macaw.Auth.Live` | LiveView `on_mount` hooks that disconnect a page the moment its session is revoked |
 | `Macaw.Auth.Conformance` | the kit every backend runs |
 
@@ -17,7 +18,7 @@ The native backend: users and sessions in the host's repo (`mix macaw_auth.gen.m
 Users are administered without host code: `Macaw.Auth.Native.bootstrap_admin/1` makes the first admin only while no user exists (safe at every boot), and `mix macaw_auth.user list | add NAME --role R | disable NAME | enable NAME | password NAME | roles NAME R… | reset-second-factor NAME` answers in JSON lines, the password from `MACAW_AUTH_USER_PASSWORD`, never argv. The same commands, and the bootstrap, are release entry points for an app's `<app>-ctl` (`Macaw.Auth.Native.Release`, on macaw_host's release protocol).
 
 ```elixir
-{:macaw_auth, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_auth.git", tag: "v0.2.0"}
+{:macaw_auth, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_auth.git", tag: "v0.3.0"}
 ```
 
 Phoenix and LiveView are required dependencies: the plugs redirect with `Phoenix.Controller` and flash a refused role, so the browser pipeline needs `fetch_flash`.
@@ -44,7 +45,8 @@ config :macaw_auth,
   backend: Macaw.Auth.Native,
   pubsub: MyApp.PubSub,
   endpoint: MyAppWeb.Endpoint,            # revocation also disconnects LiveView sockets
-  remember_cookie: "_my_app_remember"     # optional; default "_macaw_auth_remember"
+  remember_cookie: "_my_app_remember",    # optional; default "_macaw_auth_remember"
+  authorizer: MyApp.Authorizer            # a Macaw.Auth.Authorizer; without one, authorize refuses everything
 
 import Macaw.Auth.Plug
 plug :fetch_session

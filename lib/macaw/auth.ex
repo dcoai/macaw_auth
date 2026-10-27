@@ -10,7 +10,8 @@ defmodule Macaw.Auth do
                  second_factor: "/login/totp", second_factor_enroll: "/totp/enroll",
                  password_change: "/password"},
         pubsub: MyApp.PubSub,
-        endpoint: MyAppWeb.Endpoint
+        endpoint: MyAppWeb.Endpoint,
+        authorizer: MyApp.Authorizer
 
   and uses the plugs (`Macaw.Auth.Plug`) and LiveView hooks
   (`Macaw.Auth.Live`). Everything here is the same for every backend:
@@ -30,6 +31,8 @@ defmodule Macaw.Auth do
         config :macaw_auth, endpoint: MyAppWeb.Endpoint
   - **The viewer.** `viewer/1` gives a Macaw page the viewer: identity and
     roles, never preferences.
+  - **What a user may do is the app's.** `authorize/3` asks the app's
+    `Macaw.Auth.Authorizer`; with none configured, nothing is allowed.
   """
 
   alias Macaw.Auth.{Session, User}
@@ -232,6 +235,26 @@ defmodule Macaw.Auth do
   end
 
   defp topic(user_id), do: "macaw_auth:user_sessions:#{user_id}"
+
+  @doc """
+  Whether `user` may do `action` to `resource`: the answer of the app's
+  authorizer (`config :macaw_auth, authorizer: MyApp.Authorizer`, a
+  `Macaw.Auth.Authorizer`), and `false` when none is configured. An answer
+  other than `true` or `false` raises `CaseClauseError`, and whatever the
+  authorizer raises goes on up: a fault in the app is never a refusal.
+  """
+  @spec authorize(User.t(), atom(), term()) :: boolean()
+  def authorize(%User{} = user, action, resource) when is_atom(action) do
+    case Application.get_env(:macaw_auth, :authorizer) do
+      nil ->
+        false
+
+      authorizer ->
+        case authorizer.authorize(user, action, resource) do
+          answer when is_boolean(answer) -> answer
+        end
+    end
+  end
 
   @doc """
   The viewer for a Macaw page: `%{id, username, roles, source}`, or nil when

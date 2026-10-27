@@ -459,4 +459,74 @@ defmodule Macaw.Auth.PlugTest do
 
     assert Auth.viewer(request("/")) == nil
   end
+
+  describe "authorize" do
+    setup do
+      on_exit(fn -> Application.delete_env(:macaw_auth, :authorizer) end)
+    end
+
+    test "closed by default: with no authorizer, even an admin is refused" do
+      Application.delete_env(:macaw_auth, :authorizer)
+      {admin, _} = Mem.user!(%{roles: ["admin"]})
+
+      conn =
+        signed_in(admin, "/admin")
+        |> Phoenix.Controller.fetch_flash([])
+        |> AuthPlug.authorize(:manage)
+
+      assert conn.halted and conn.status == 302
+      assert location(conn) == "/home"
+      assert Phoenix.Flash.get(conn.assigns.flash, :error) == "You are not allowed to do that."
+    end
+
+    test "the authorizer's true passes and its false refuses, as require_role refuses" do
+      Application.put_env(:macaw_auth, :authorizer, Macaw.Auth.Test.Authorizer)
+      {admin, _} = Mem.user!(%{roles: ["admin"]})
+      {viewer, _} = Mem.user!(%{roles: ["viewer"]})
+
+      refute (signed_in(admin, "/admin") |> AuthPlug.authorize(:manage)).halted
+
+      conn =
+        signed_in(viewer, "/admin")
+        |> Phoenix.Controller.fetch_flash([])
+        |> AuthPlug.authorize(:manage)
+
+      assert conn.halted and conn.status == 302
+      assert location(conn) == "/home"
+      assert Phoenix.Flash.get(conn.assigns.flash, :error) == "You are not allowed to do that."
+
+      without_flash = signed_in(viewer, "/admin") |> AuthPlug.authorize(:manage)
+      assert without_flash.halted and location(without_flash) == "/home"
+      refute Map.has_key?(without_flash.assigns, :flash)
+    end
+
+    test "the resource is the option's function of the conn, else nil" do
+      Application.put_env(:macaw_auth, :authorizer, Macaw.Auth.Test.Authorizer)
+      {owner, _} = Mem.user!(%{})
+      {other, _} = Mem.user!(%{})
+      opts = {:edit, resource: &Macaw.Auth.Test.Authorizer.post/1}
+
+      refute (signed_in(owner, "/posts?owner=#{owner.id}") |> AuthPlug.authorize(opts)).halted
+      assert (signed_in(other, "/posts?owner=#{owner.id}") |> AuthPlug.authorize(opts)).halted
+      # Without `resource:` the authorizer is asked about nil, and refuses an edit.
+      assert (signed_in(owner, "/posts") |> AuthPlug.authorize(:edit)).halted
+    end
+
+    test "a signed-out visitor is sent to sign in, remembering where a GET was going" do
+      Application.put_env(:macaw_auth, :authorizer, Macaw.Auth.Test.Authorizer)
+      conn = request("/admin?tab=users") |> AuthPlug.authorize(:manage)
+      assert conn.halted and location(conn) == "/login"
+      assert get_session(conn, "macaw_auth_return_to") == "/admin?tab=users"
+    end
+
+    test "an authorizer that raises crashes the request" do
+      Application.put_env(:macaw_auth, :authorizer, Macaw.Auth.Test.Authorizer)
+      {user, _} = Mem.user!(%{})
+      conn = signed_in(user, "/boom")
+
+      assert_raise RuntimeError, "the authorizer failed", fn ->
+        AuthPlug.authorize(conn, :explode)
+      end
+    end
+  end
 end

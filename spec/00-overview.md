@@ -3,7 +3,7 @@
 ## 1. What macaw_auth holds {#auth-holds}
 
 Eight projects carried their own authentication, in three lineages, about 17,600 lines of it, and the copies had drifted on security: a DN-escaping bug fixed in one lineage and live in another, four projects without login throttling, two storing session tokens in the clear, two unable to revoke an open LiveView (macaw_compose#32). `macaw_auth` implements it once, grown from the exio and macaw lineage, which carried every fix the others lacked. It holds:
-- **the contract** an app uses, the same whatever backend is behind it: `Macaw.Auth` (sign-in, sessions, steps, paths, revocation that reaches open pages, the viewer), the `Macaw.Auth.Backend` behavior, and the `Macaw.Auth.User` and `Macaw.Auth.Session` structs ([01](01-contract.md));
+- **the contract** an app uses, the same whatever backend is behind it: `Macaw.Auth` (sign-in, sessions, steps, paths, revocation that reaches open pages, the viewer, authorization), the `Macaw.Auth.Backend` behavior, the `Macaw.Auth.Authorizer` behavior the app implements, and the `Macaw.Auth.User` and `Macaw.Auth.Session` structs ([01](01-contract.md));
 - **the request side:** `Macaw.Auth.Plug`, plugs for a Phoenix router ([02](02-plugs.md));
 - **the LiveView side:** `Macaw.Auth.Live`, `on_mount` hooks that disconnect a page the moment its session is revoked ([03](03-live.md));
 - **the conformance kit:** `Macaw.Auth.Conformance`, the tests every backend runs ([04](04-conformance.md));
@@ -15,6 +15,7 @@ A consumer needs only a narrow contract: who the current user is, plugs and hook
 
 - **What is the same for every backend is `Macaw.Auth`'s:** the steps a session owes and their order, the configured paths, the revocation push, the viewer, and the plugs and hooks built on them ([01 §1](01-contract.md#auth-contract-facade)).
 - **What differs is the backend's:** who someone is, and their sessions, the nine callbacks of `Macaw.Auth.Backend` ([01 §2](01-contract.md#auth-backend)).
+- **What a user may do is the app's:** its `Macaw.Auth.Authorizer`, `config :macaw_auth, authorizer: MyApp.Authorizer`, never the backend's ([01 §9](01-contract.md#auth-authorize)).
 - **The backend is the developer's build-time choice,** `config :macaw_auth, backend: Macaw.Auth.Native` ([01 §1.1](01-contract.md#auth-backend-config)).
 - **Two backends exist:** `Macaw.Auth.Native`, in this library, and `Macaw.Auth.Ash`, over AshAuthentication, in its own library, [macaw_auth_ash](https://gitlab.conet.yarina.org/dco-tek/macaw_auth_ash/-/blob/main/spec/00-overview.md#ash-overview), so `macaw_auth` never depends on Ash. The kit runs against both.
 
@@ -40,7 +41,7 @@ The test suite carries a third, `Macaw.Auth.Test.MemoryBackend` (`test/support`)
 the application starts Macaw.Auth.Registry and Macaw.Auth.Native.Throttle; Macaw.Auth.subscribe/1 then succeeds without a :pubsub, and Throttle.check/3 answers
 ```
 
-It is released by git tag: v0.1.0; v0.1.1, which added `Macaw.Auth.announce_revoked/2` for the Ash backend (macaw_compose#53); and v0.2.0, which changed the backend contract: `session_idle_seconds/1` is a new callback, for the remember cookie (macaw_compose#77), `create_session/2` and `complete_step/3` may refuse with `{:error, :invalid}`, and the kit's fixtures delete users (`delete!/1`) (macaw_compose#74). A backend written for v0.1 must follow all three.
+It is released by git tag: v0.1.0; v0.1.1, which added `Macaw.Auth.announce_revoked/2` for the Ash backend (macaw_compose#53); and v0.2.0, which changed the backend contract: `session_idle_seconds/1` is a new callback, for the remember cookie (macaw_compose#77), `create_session/2` and `complete_step/3` may refuse with `{:error, :invalid}`, and the kit's fixtures delete users (`delete!/1`) (macaw_compose#74). A backend written for v0.1 must follow all three. v0.3.0 adds, without changing the backend contract: the first admin at boot, `mix macaw_auth.user` and its release entry points ([13](13-native-users.md)) (macaw_compose#79); and authorization, the app's `Macaw.Auth.Authorizer` with `Macaw.Auth.authorize/3`, the plug `authorize/2` and the hook `{:authorize, action}`, closed when no authorizer is configured ([01 §9](01-contract.md#auth-authorize)) (macaw_compose#80).
 
 ## 4. The boundary with Macaw composition {#auth-boundary}
 
@@ -57,6 +58,7 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 - **a password is never read from the command line:** the user commands take it from an environment variable and refuse one among their arguments ([13 §3.1](13-native-users.md#auth-users-passwords));
 - **the release entry points have no default prefix:** without `env_prefix` they refuse ([13 §5](13-native-users.md#auth-users-release));
 - **a role check passes only on membership,** and what a role allows is the app's ([02 §4](02-plugs.md#auth-plug-require-role));
+- **with no authorizer configured, nothing is authorized:** `Macaw.Auth.authorize/3` is false, and the plug and the hook refuse ([01 §9](01-contract.md#auth-authorize));
 - **the remember cookie is `secure` under https,** with no setting to turn it off, and is set only when a sign-in asks for it ([02 §10](02-plugs.md#auth-plug-remember)).
 
 ## 6. Known gaps {#auth-gaps}
@@ -64,7 +66,7 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 Found while writing this spec from the code (v0.1.1); each section states what the code does, and these are open for the owner's decision. The bugs and smaller faults found then were fixed in v0.2.0 (macaw_compose#74).
 
 **Gaps against the proposal (macaw_compose#32, #51):**
-- **Not implemented:** the `authorize/3` callback; warnings at boot on `verify_peer: false` and on a no-authentication mode.
+- **Not implemented:** warnings at boot on `verify_peer: false` and on a no-authentication mode.
 - **No `Store` behavior.** The native backend is Ecto only; the behavior stays out until uficap adopts `macaw_auth` (macaw_compose#75, [13 §6](13-native-users.md#auth-users-store)).
 - **The backend has no default.** The proposal made native the default backend; `Macaw.Auth.backend/0` raises when `:backend` is unset ([01 §1.1](01-contract.md#auth-backend-config)).
 - **The kit checks less than proposed.** It checks replay and revocation, but not timing parity, escaping or the throttle, which are the native backend's own tests ([04 §2](04-conformance.md#auth-kit-checks)).

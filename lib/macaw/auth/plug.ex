@@ -27,7 +27,8 @@ defmodule Macaw.Auth.Plug do
 
   Run `Macaw.Plug.ClientIp` before these, so a session records, and the
   throttle counts, the client's address, not a proxy's. Run `fetch_flash`
-  before `require_role/2`, or its refusal goes home without saying why.
+  before `require_role/2` and `authorize/2`, or their refusal goes home
+  without saying why.
 
   **Remembering a browser.** `log_in(conn, user, remember: true)` (a
   "remember me" box) also sets a signed cookie holding the session's token
@@ -181,10 +182,46 @@ defmodule Macaw.Auth.Plug do
 
     if user && Enum.any?(user.roles, &(&1 in roles)),
       do: conn,
-      else:
-        conn
-        |> flash(:error, "You are not allowed to do that.")
-        |> redirect(Auth.path(:home))
+      else: refuse(conn)
+  end
+
+  @doc """
+  Asks the app's authorizer (`Macaw.Auth.authorize/3`) whether the current
+  user may do `action`, and refuses as `require_role/2` does: home, with an
+  error flash when the pipeline ran `fetch_flash`. A signed-out visitor is
+  sent to sign in instead, remembering where a `GET` was going. With no
+  authorizer configured, every request is refused.
+
+      plug :authorize, :manage
+      plug :authorize, {:edit, resource: &MyAppWeb.Posts.post/1}
+
+  The resource is what the `:resource` option's function (a remote capture,
+  `&Mod.fun/1`, so the plug's options compile) gives of the conn, else nil.
+  It is asked only of a signed-in request.
+  """
+  def authorize(conn, action) when is_atom(action), do: authorize(conn, {action, []})
+
+  def authorize(conn, {action, opts}) when is_atom(action) and is_list(opts) do
+    resource = opts |> Keyword.validate!(resource: nil) |> Keyword.fetch!(:resource)
+
+    case conn.assigns[:current_user] do
+      nil ->
+        conn |> remember_return() |> redirect(Auth.path(:sign_in))
+
+      user ->
+        if Auth.authorize(user, action, resource(resource, conn)),
+          do: conn,
+          else: refuse(conn)
+    end
+  end
+
+  defp resource(nil, _conn), do: nil
+  defp resource(fun, conn) when is_function(fun, 1), do: fun.(conn)
+
+  defp refuse(conn) do
+    conn
+    |> flash(:error, "You are not allowed to do that.")
+    |> redirect(Auth.path(:home))
   end
 
   defp flash(%Plug.Conn{assigns: %{flash: _}} = conn, kind, message),

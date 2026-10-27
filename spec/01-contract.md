@@ -1,10 +1,10 @@
 # 01 — The contract {#auth-contract}
 
-What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Macaw.Auth.Backend`, what a backend implements; and the two structs every backend reports, `Macaw.Auth.User` and `Macaw.Auth.Session`. The plugs ([02](02-plugs.md)) and the hooks ([03](03-live.md)) are built on these.
+What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Macaw.Auth.Backend`, what a backend implements; `Macaw.Auth.Authorizer`, what the app implements to decide what a user may do (§9); and the two structs every backend reports, `Macaw.Auth.User` and `Macaw.Auth.Session`. The plugs ([02](02-plugs.md)) and the hooks ([03](03-live.md)) are built on these.
 
 ## 1. The facade {#auth-contract-facade}
 
-`Macaw.Auth` owns what is the same for every backend, so a backend never reimplements it: the steps a session owes (§4), the paths (§3), the revocation push (§6) and the viewer (§8). Its session and sign-in functions pass through to the configured backend:
+`Macaw.Auth` owns what is the same for every backend, so a backend never reimplements it: the steps a session owes (§4), the paths (§3), the revocation push (§6), the viewer (§8) and asking the app's authorizer (§9). Its session and sign-in functions pass through to the configured backend:
 
 | Function | Calls | Returns |
 |---|---|---|
@@ -244,4 +244,41 @@ struct!(Macaw.Auth.User, %{username: "a"}) and struct!(Macaw.Auth.Session, %{id:
 
 ```test:viewer
 a conn with a signed-in admin gives exactly %{id: id, username: name, roles: ["admin"], source: "local"}; a signed-out conn gives nil
+```
+
+## 9. Authorization is the app's {#auth-authorize}
+
+What a user may do is the app's to decide, not the backend's: a backend says who someone is (§2), and the app says what they may do. The app implements **`Macaw.Auth.Authorizer`**, one callback, and names its module:
+
+```elixir
+config :macaw_auth, authorizer: MyApp.Authorizer
+
+defmodule MyApp.Authorizer do
+  @behaviour Macaw.Auth.Authorizer
+
+  @impl Macaw.Auth.Authorizer
+  def authorize(%Macaw.Auth.User{id: id}, :edit, %MyApp.Post{owner_id: id}), do: true
+  def authorize(%Macaw.Auth.User{roles: roles}, :manage, _resource), do: "admin" in roles
+  def authorize(_user, _action, _resource), do: false
+end
+```
+
+**`authorize(user, action, resource) :: boolean()`**: whether `user` (a `%Macaw.Auth.User{}`, §7.1) may do `action` (an atom the app chooses) to `resource` (the app's own term, nil when a guard names none). It is the app's whole policy; the library neither reads nor interprets `action` or `resource`. Roles stay the app's too: a plain membership check is `require_role` ([02 §4](02-plugs.md#auth-plug-require-role), [03 §2](03-live.md#auth-live-guarded)), which needs no authorizer.
+
+`Macaw.Auth.authorize/3` asks it, and the plug ([02 §4.1](02-plugs.md#auth-plug-authorize)) and the hook ([03 §2](03-live.md#auth-live-guarded)) are built on it:
+- **closed by default:** with no `:authorizer` configured (read at each call), `authorize/3` is **`false`** for every user, action and resource, so every guarded request and page is refused;
+- **the answer is the authorizer's** `true` or `false`, returned as it is;
+- **any other answer raises** `CaseClauseError`, and **whatever the authorizer raises goes on up**, crashing the request or page: a fault in the app is never mistaken for a refusal, and nothing catches it;
+- `action` must be an atom (any other term is a `FunctionClauseError`), and `user` a `%Macaw.Auth.User{}`: a signed-out visitor is the guards' business, sent to sign in before any authorizer is asked.
+
+```test:authorize-closed
+with :authorizer unset, Macaw.Auth.authorize(admin, :manage, nil) and Macaw.Auth.authorize(admin, :edit, %{owner_id: admin.id}) are false
+```
+
+```test:authorize-answer
+with a test authorizer configured, authorize/3 returns its answer: true for an admin's :manage and an owner's :edit, false for a viewer's :manage and another user's :edit
+```
+
+```test:authorize-faults
+an authorizer that raises makes authorize/3 raise the same exception; one that answers :yes makes it raise CaseClauseError
 ```
