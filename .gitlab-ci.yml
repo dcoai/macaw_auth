@@ -29,14 +29,10 @@ stages:
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.conet.yarina.org/".insteadOf "git@gitlab.conet.yarina.org:"
     - mix local.hex --force
     - mix local.rebar --force
-    - mix deps.get
-  cache:
-    key:
-      files:
-        - mix.lock
-    paths:
-      - deps
-      - _build
+    # Compiled dependencies come from the group's depdep store (scripts/depdep.exs,
+    # spec/00 §4.1 of macaw_compose); git dependencies' sources are restored too. A
+    # store that can't be reached falls back to a bare deps.get.
+    - elixir scripts/depdep.exs --pull --mix-get --compile-deps || mix deps.get
 
 format:
   extends: .elixir
@@ -49,6 +45,8 @@ compile:
   stage: check
   script:
     - mix compile --force --warnings-as-errors
+    # Push what the store lacked, only after a green build.
+    - elixir scripts/depdep.exs --push || echo "depdep bootstrap failed - nothing pushed"
 
 spelling:
   image: $ELIXIR_IMAGE
