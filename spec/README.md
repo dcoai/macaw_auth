@@ -17,5 +17,6 @@
 | [10 — Native: the throttle](10-native-throttle.md) | `Macaw.Auth.Native.Throttle`: keys, the backoff and its cap, reset rules, the second factor's key, the sweep, a block's timing | implemented (v0.1.0) |
 | [11 — Native: the second factor](11-native-totp.md) | `Macaw.Auth.Native.Totp` and `Macaw.Auth.Native.Seal`: the window, replay by conditional update, sealing, recovery codes, lifecycle, policy, `admin_reset` | implemented (v0.1.0) |
 | [12 — Native: migrations](12-native-migrations.md) | `mix macaw_auth.gen.migration`: the three files, only the missing ones, their order | implemented (v0.1.0) |
+| [13 — Native: administering users](13-native-users.md) | `Macaw.Auth.Native`'s user functions and `bootstrap_admin/1`, `Macaw.Auth.Native.UserCommands`, `mix macaw_auth.user`, the release entry points `Macaw.Auth.Native.Release` on macaw_host's protocol, passwords never from the command line, no `Store` behavior yet | implemented (unreleased) |
 
 Every heading carries an anchor prefixed `auth-`, so links into this spec stay stable when a heading is reworded. Each behavioral rule carries a test hint (a fenced block whose info string is `test:<id>`) that says what a test of it must show.

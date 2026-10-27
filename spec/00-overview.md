@@ -7,7 +7,7 @@ Eight projects carried their own authentication, in three lineages, about 17,600
 - **the request side:** `Macaw.Auth.Plug`, plugs for a Phoenix router ([02](02-plugs.md));
 - **the LiveView side:** `Macaw.Auth.Live`, `on_mount` hooks that disconnect a page the moment its session is revoked ([03](03-live.md));
 - **the conformance kit:** `Macaw.Auth.Conformance`, the tests every backend runs ([04](04-conformance.md));
-- **the native backend,** `Macaw.Auth.Native`, on the host's Ecto repo: its configuration and sign-in ([05](05-native-config.md)), a chain of sources with local passwords and just-in-time provisioning ([06](06-native-sources.md)), LDAP over OTP's `:eldap` ([07](07-native-ldap.md)), bcrypt or argon2 ([08](08-native-hashers.md)), hashed sessions ([09](09-native-sessions.md)), the sign-in throttle ([10](10-native-throttle.md)), TOTP and recovery codes ([11](11-native-totp.md)), and the generator of its migrations ([12](12-native-migrations.md)).
+- **the native backend,** `Macaw.Auth.Native`, on the host's Ecto repo: its configuration and sign-in ([05](05-native-config.md)), a chain of sources with local passwords and just-in-time provisioning ([06](06-native-sources.md)), LDAP over OTP's `:eldap` ([07](07-native-ldap.md)), bcrypt or argon2 ([08](08-native-hashers.md)), hashed sessions ([09](09-native-sessions.md)), the sign-in throttle ([10](10-native-throttle.md)), TOTP and recovery codes ([11](11-native-totp.md)), the generator of its migrations ([12](12-native-migrations.md)), and administering its users: the first admin at boot, `mix macaw_auth.user`, and the same commands as release entry points for an app's `<app>-ctl` ([13](13-native-users.md)).
 
 ## 2. A contract with backends behind it {#auth-shape}
 
@@ -28,6 +28,7 @@ The test suite carries a third, `Macaw.Auth.Test.MemoryBackend` (`test/support`)
   - `ecto_sql`, for the native backend's store: the host gives its repo, and `mix macaw_auth.gen.migration` writes the tables into the host ([12](12-native-migrations.md));
   - `nimble_totp`, for the second factor ([11](11-native-totp.md));
   - `macaw_plug` (by git tag, v0.1.0): the host runs `Macaw.Plug.ClientIp` ahead of the plugs, so `conn.remote_ip` is the client's address the throttle counts ([macaw_plug 01 §4](https://gitlab.conet.yarina.org/dco-tek/macaw_plug/-/blob/main/spec/01-client-ip.md#plug-client-ip-call)). The throttle itself stays here: backoff after failures is a different policy from a request rate (macaw_compose#34). No `macaw_auth` module calls `macaw_plug`; the dependency is the pipeline's order.
+  - `macaw_host` (by git tag, v0.1.1): the release side of `<app>-ctl`'s protocol, `Macaw.Host.Release` (the arguments as JSON in `<PREFIX>_CTL_ARGS`, the password in `<PREFIX>_CTL_PASSWORD`, JSON lines out, a failure one line on stderr and exit status 1), which the user commands' release entry points speak ([13 §5](13-native-users.md#auth-users-release), [macaw_host 03 §1](https://gitlab.conet.yarina.org/dco-tek/macaw_host/-/blob/main/spec/03-release.md#host-release-protocol)) (macaw_compose#75);
 - **Runtime, optional:** `bcrypt_elixir` (`~> 3.2`) and `argon2_elixir` (`~> 4.1`). Each hasher is compiled only when its library is present; the configured one must be, checked when the configuration is read, with a named error ([08 §1](08-native-hashers.md#auth-hasher-behavior)).
 - **OTP applications:** `:logger`, `:crypto`, `:eldap`, `:ssl`, `:public_key`. No LDAP library: the directory is spoken to over OTP's `:eldap`, as every adopter did.
 - **Test only:** `ecto_sqlite3` (the test repo is SQLite, migrated with the generated migrations, so what ships is what is tested) and `stream_data`. The `:ldap` tests need macaw's OpenLDAP fixture directory (the `ci-ldap` image in CI) and run when `MACAW_AUTH_LDAP_HOST` names it; otherwise they are excluded.
@@ -52,7 +53,9 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 - **a certificate is verified,** chain and hostname, unless `verify_peer: false` ([07 §2](07-native-ldap.md#auth-ldap-connect));
 - **an anonymous directory search** needs `allow_anonymous_search: true` ([07 §1.2](07-native-ldap.md#auth-ldap-finding));
 - **a directory user never takes over a row another source owns** ([06 §4](06-native-sources.md#auth-provision));
-- **there is no registration:** a local user is made by the host (`Macaw.Auth.Native.create_user/1`), a directory user only by signing in;
+- **there is no registration:** a local user is made by the host (`Macaw.Auth.Native.create_user/1`, or an administrator's `mix macaw_auth.user add`), a directory user only by signing in, and **the first admin only while no user exists** ([13 §2](13-native-users.md#auth-users-bootstrap));
+- **a password is never read from the command line:** the user commands take it from an environment variable and refuse one among their arguments ([13 §3.1](13-native-users.md#auth-users-passwords));
+- **the release entry points have no default prefix:** without `env_prefix` they refuse ([13 §5](13-native-users.md#auth-users-release));
 - **a role check passes only on membership,** and what a role allows is the app's ([02 §4](02-plugs.md#auth-plug-require-role));
 - **the remember cookie is `secure` under https,** with no setting to turn it off, and is set only when a sign-in asks for it ([02 §10](02-plugs.md#auth-plug-remember)).
 
@@ -61,7 +64,8 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 Found while writing this spec from the code (v0.1.1); each section states what the code does, and these are open for the owner's decision. The bugs and smaller faults found then were fixed in v0.2.0 (macaw_compose#74).
 
 **Gaps against the proposal (macaw_compose#32, #51):**
-- **Not implemented:** first-admin bootstrap and a `mix macaw_auth.user` task; the `authorize/3` callback; warnings at boot on `verify_peer: false` and on a no-authentication mode; a `Store` behavior (the native backend is Ecto only).
+- **Not implemented:** the `authorize/3` callback; warnings at boot on `verify_peer: false` and on a no-authentication mode.
+- **No `Store` behavior.** The native backend is Ecto only; the behavior stays out until uficap adopts `macaw_auth` (macaw_compose#75, [13 §6](13-native-users.md#auth-users-store)).
 - **The backend has no default.** The proposal made native the default backend; `Macaw.Auth.backend/0` raises when `:backend` is unset ([01 §1.1](01-contract.md#auth-backend-config)).
 - **The kit checks less than proposed.** It checks replay and revocation, but not timing parity, escaping or the throttle, which are the native backend's own tests ([04 §2](04-conformance.md#auth-kit-checks)).
 - **A completed step is the host's word.** `Macaw.Auth.complete_step/3` marks `:second_factor` or `:second_factor_enroll` passed without a code or an enrollment: the second factor's page must go through `Macaw.Auth.Plug.verify_second_factor/2`, and enrollment's must call it only after `Macaw.Auth.Native.enroll_confirm/3` succeeded ([01 §4](01-contract.md#auth-steps)).

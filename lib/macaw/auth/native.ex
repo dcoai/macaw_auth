@@ -56,6 +56,8 @@ defmodule Macaw.Auth.Native do
 
   @behaviour Macaw.Auth.Backend
 
+  import Ecto.Query, only: [order_by: 2]
+
   alias Macaw.Auth.Native.{Config, Sessions, Source, Throttle, Totp, UserRecord}
   alias Macaw.Auth.User
 
@@ -217,7 +219,11 @@ defmodule Macaw.Auth.Native do
   def disable(%User{} = user, code, opts \\ []),
     do: throttled(user, opts, fn -> Totp.disable(user, code, opts) end)
 
-  @doc "An administrator clears a user's second factor and revokes their sessions."
+  @doc """
+  An administrator clears a user's second factor and revokes their sessions,
+  telling their open pages unless option `announce: false`
+  (`Macaw.Auth.Native.Totp.admin_reset/2`).
+  """
   @spec admin_reset(User.t() | term(), keyword()) :: :ok
   defdelegate admin_reset(user, opts \\ []), to: Totp
 
@@ -298,4 +304,163 @@ defmodule Macaw.Auth.Native do
 
   defp local_name(config),
     do: Enum.find_value(config.sources, "local", &(match?(%Source.Password{}, &1) && &1.name))
+
+  # ── Administering users ───────────────────────────────────────────────
+  #
+  # What `mix macaw_auth.user` and the release entry points
+  # (`Macaw.Auth.Native.UserCommands`) run. Users are named by username, as
+  # typed: trimmed and lower-cased like sign-in's.
+
+  @doc """
+  Makes the first user, a local one with role `:role`, **only when no user
+  exists**: `{:ok, record}` when it made one, `:exists` when any user is
+  there (local or a directory's, whoever it is), so it is safe to call at
+  every boot. Takes `:username`, `:password` and `:role`, and optionally
+  `:display_name` and `:must_change_password`.
+
+  With no user yet, the password and the role are required:
+  `{:error, :no_password}`, `{:error, :no_role}`, or `{:error, changeset}`
+  (an invalid username). When users exist neither is looked at, so a host
+  may stop providing the password once its admin exists.
+
+  Two first boots at once with the same username make one user: the other
+  call's insert meets the unique index and answers `:exists`.
+  """
+  @spec bootstrap_admin(map()) ::
+          {:ok, UserRecord.t()} | :exists | {:error, :no_password | :no_role | Ecto.Changeset.t()}
+  def bootstrap_admin(attrs) when is_map(attrs) do
+    %Config{repo: repo} = Config.get()
+
+    cond do
+      repo.exists?(UserRecord) -> :exists
+      not filled?(attrs[:password]) -> {:error, :no_password}
+      not filled?(attrs[:role]) -> {:error, :no_role}
+      true -> bootstrap_insert(attrs)
+    end
+  end
+
+  defp bootstrap_insert(attrs) do
+    user =
+      attrs
+      |> Map.take([:username, :password, :display_name, :must_change_password])
+      |> Map.put(:roles, [attrs.role])
+
+    case create_user(user) do
+      {:ok, record} ->
+        {:ok, record}
+
+      {:error, changeset} ->
+        if taken?(changeset), do: :exists, else: {:error, changeset}
+    end
+  end
+
+  defp filled?(value), do: is_binary(value) and value != ""
+
+  defp taken?(%Ecto.Changeset{errors: errors}) do
+    case errors[:username] do
+      {_message, opts} -> opts[:constraint] == :unique
+      nil -> false
+    end
+  end
+
+  @doc "Every user, local and directory, by username."
+  @spec list_users() :: [UserRecord.t()]
+  def list_users do
+    %Config{repo: repo} = Config.get()
+    repo.all(order_by(UserRecord, :username))
+  end
+
+  @doc """
+  The user named `username` (trimmed and lower-cased, as sign-in matches
+  it), or nil, also for a string that can't be a username.
+  """
+  @spec get_user(term()) :: UserRecord.t() | nil
+  def get_user(username) do
+    case UserRecord.normalize_username(username) do
+      {:ok, name} -> Config.get().repo.get_by(UserRecord, username: name)
+      {:error, :invalid_username} -> nil
+    end
+  end
+
+  @doc """
+  Disables a user: their sign-in is refused, and each of their sessions at
+  its next look-up (`Macaw.Auth.Native.Sessions`), so open pages leave at
+  their next re-check. A user already disabled keeps when it was first
+  done. `{:ok, record}` or `{:error, :not_found}`.
+  """
+  @spec disable_user(String.t()) :: {:ok, UserRecord.t()} | {:error, :not_found}
+  def disable_user(username) do
+    with {:ok, record} <- fetch_user(username) do
+      case record.disabled_at do
+        nil -> update(record, %{disabled_at: DateTime.utc_now()})
+        %DateTime{} -> {:ok, record}
+      end
+    end
+  end
+
+  @doc "Enables a disabled user again: `{:ok, record}` or `{:error, :not_found}`."
+  @spec enable_user(String.t()) :: {:ok, UserRecord.t()} | {:error, :not_found}
+  def enable_user(username) do
+    with {:ok, record} <- fetch_user(username), do: update(record, %{disabled_at: nil})
+  end
+
+  @doc """
+  Replaces a local user's password, hashed with the configured hasher, and
+  revokes every session of theirs (reason `:password_changed`), so whoever
+  held the old one is signed out. `{:ok, record}`, or `{:error, :not_found
+  | :not_local | :no_password}`: a directory user's password is the
+  directory's, and is never set here.
+
+  Option `:announce` (default `true`): tell the user's open pages, which
+  disconnect (`Macaw.Auth.announce_revoked/2`). A process that is not the
+  app's node, such as a release's `eval` or a mix task, passes `false`:
+  there is no page there to tell, and the pages leave at their next
+  re-check.
+  """
+  @spec set_password(String.t(), term(), keyword()) ::
+          {:ok, UserRecord.t()} | {:error, :not_found | :not_local | :no_password}
+  def set_password(username, password, opts \\ []) do
+    config = Config.get()
+
+    with {:ok, record} <- fetch_user(username),
+         :ok <- local(config, record),
+         :ok <- if(filled?(password), do: :ok, else: {:error, :no_password}),
+         {:ok, record} <- update(record, %{hashed_password: config.hasher.hash(password)}) do
+      :ok = Sessions.revoke_all(record.id, :password_changed, opts)
+      {:ok, record}
+    end
+  end
+
+  @doc """
+  Replaces a local user's roles with `roles`, a list of non-empty strings:
+  `{:ok, record}`, or `{:error, :not_found | :not_local | :invalid_roles}`.
+  A directory user's roles are re-derived from the directory at each
+  sign-in (`Macaw.Auth.Native.Provision`), so they are never set here.
+  """
+  @spec set_roles(String.t(), [String.t()]) ::
+          {:ok, UserRecord.t()} | {:error, :not_found | :not_local | :invalid_roles}
+  def set_roles(username, roles) do
+    with :ok <- if(roles?(roles), do: :ok, else: {:error, :invalid_roles}),
+         {:ok, record} <- fetch_user(username),
+         :ok <- local(Config.get(), record) do
+      update(record, %{roles: roles})
+    end
+  end
+
+  defp roles?(roles), do: is_list(roles) and Enum.all?(roles, &filled?/1)
+
+  defp fetch_user(username) do
+    case get_user(username) do
+      %UserRecord{} = record -> {:ok, record}
+      nil -> {:error, :not_found}
+    end
+  end
+
+  defp local(config, %UserRecord{source: source}),
+    do: if(source == local_name(config), do: :ok, else: {:error, :not_local})
+
+  # A changeset of a row that loaded, with values checked above, can only
+  # fail through a bug: raised.
+  defp update(record, changes),
+    do: {:ok, record |> Ecto.Changeset.change(changes) |> Config.get().repo.update!()}
 end

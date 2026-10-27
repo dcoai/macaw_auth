@@ -193,6 +193,23 @@ defmodule Macaw.Auth.Native.Sessions do
   end
 
   @doc """
+  Deletes every session of user `user_id`'s, `reason` going to telemetry,
+  and tells their open pages (`Macaw.Auth.announce_revoked/2`), which
+  disconnect, unless option `announce: false`: a process that is not the
+  app's node (a release's `eval`, a mix task) has no page to tell, and the
+  pages leave at their next re-check. What an administrator's change of a
+  user (`Macaw.Auth.Native.set_password/3`, `admin_reset/2`) revokes with.
+  """
+  @spec revoke_all(term(), atom(), keyword()) :: :ok
+  def revoke_all(user_id, reason, opts) do
+    {user_id, ids} = revoke({:user, user_id}, reason: reason)
+
+    if Keyword.get(opts, :announce, true),
+      do: Macaw.Auth.announce_revoked(user_id, ids),
+      else: :ok
+  end
+
+  @doc """
   Deletes one session (an id) or a user's (`{:user, id}`, keeping
   `:except`): `{user_id, ids}`, the ids empty when nothing was there.
   `:reason` goes to telemetry.

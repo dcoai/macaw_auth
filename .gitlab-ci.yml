@@ -20,9 +20,9 @@ stages:
   variables:
     MIX_ENV: test
   before_script:
-    # Git dependencies (macaw_plug) come over HTTPS with this job's token:
+    # Git dependencies (macaw_plug, macaw_host) come over HTTPS with this job's token:
     # the image has no git, and the SSH URLs in mix.exs need a key CI lacks.
-    # macaw_plug allowlists this project's job token. build-essential: the
+    # macaw_plug and macaw_host allowlist this project's job token. build-essential: the
     # bcrypt and argon2 NIFs compile from source, and the slim image has no
     # C compiler.
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential > /dev/null

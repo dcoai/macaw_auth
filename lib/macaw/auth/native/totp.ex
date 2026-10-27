@@ -44,7 +44,7 @@ defmodule Macaw.Auth.Native.Totp do
 
   import Ecto.Query
 
-  alias Macaw.Auth.Native.{Config, RecoveryCodeRecord, Seal, UserRecord}
+  alias Macaw.Auth.Native.{Config, RecoveryCodeRecord, Seal, Sessions, UserRecord}
   alias Macaw.Auth.User
 
   @step 30
@@ -406,18 +406,20 @@ defmodule Macaw.Auth.Native.Totp do
 
   @doc """
   An administrator clears a user's second factor (a lost device), enrolled
-  or pending, and revokes every session of theirs (`Macaw.Auth.revoke/2`,
-  so their open pages disconnect): they sign in again, and enroll again if
-  policy requires. `:ok`.
+  or pending, and revokes every session of theirs
+  (`Macaw.Auth.Native.Sessions.revoke_all/3`, so their open pages
+  disconnect): they sign in again, and enroll again if policy requires.
+  `:ok`. Option `:announce` (default `true`): `false` revokes without
+  telling open pages, for a process that is not the app's node.
   """
   @spec admin_reset(user(), keyword()) :: :ok
-  def admin_reset(user, _opts \\ []) do
+  def admin_reset(user, opts \\ []) do
     %Config{repo: repo} = Config.get()
 
     case uuid(user) do
       {:ok, id} ->
         clear(repo, id)
-        :ok = Macaw.Auth.revoke({:user, id}, reason: :second_factor_reset)
+        :ok = Sessions.revoke_all(id, :second_factor_reset, opts)
         event(:reset, id)
         :ok
 

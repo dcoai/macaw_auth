@@ -155,7 +155,7 @@ with totp_required true, a new user is :required
 ## 8. Turning it off {#auth-totp-disable}
 
 - **The user** turns it off with `Macaw.Auth.Native.disable/3`, proving it with a current code or a recovery code (which is spent), behind the throttle: `:ok`, the sealed secret, enabled time, last step and recovery codes all deleted, in one transaction. **Refused with `{:error, :required}` while policy requires one** (an administrator's reset then); `{:error, :invalid_code}` for a wrong code or a user not enrolled.
-- **An administrator** clears it with `Macaw.Auth.Native.admin_reset/2` (a lost device), enrolled or pending, **and revokes every session of theirs** through `Macaw.Auth.revoke/2` with reason `:second_factor_reset`, so their open pages disconnect: they sign in again, and enroll again if policy requires. `:ok`, also for an id that isn't a UUID (nothing happens).
+- **An administrator** clears it with `Macaw.Auth.Native.admin_reset/2` (a lost device), enrolled or pending, **and revokes every session of theirs** with reason `:second_factor_reset` (`Macaw.Auth.Native.Sessions.revoke_all/3`, [09 §5](09-native-sessions.md#auth-sessions-revoke)), so their open pages disconnect: they sign in again, and enroll again if policy requires. `:ok`, also for an id that isn't a UUID (nothing happens). With option `announce: false` the sessions are revoked without the push, for a process that is not the app's node; `mix macaw_auth.user reset-second-factor` and its release entry point run it so ([13 §1](13-native-users.md#auth-users-api)).
 
 ```test:totp-disable
 "abcdef" doesn't disable; a current code does: the user is :none, the sealed secret nil, no recovery codes left; an admin under totp_required ["admin"] gets {:error, :required}

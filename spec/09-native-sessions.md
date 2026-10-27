@@ -96,6 +96,12 @@ after the user's disabled_at is set, fetch is {:error, :disabled}, the row is go
 - **a user's** (`{:user, user_id}`), keeping `except:` when it is a session id: `{user_id, ids}`. **An `except:` that is no UUID keeps nothing.** A user id that isn't a UUID revokes nothing: `{user_id, []}`;
 - the `:reason` option (an atom, such as `:password_changed` or `:second_factor_reset`) goes to telemetry (§7).
 
+`Macaw.Auth.Native.Sessions.revoke_all/3` is what an administrator's change of a user revokes with (`set_password/3`, `admin_reset/2`, [13 §1](13-native-users.md#auth-users-api)): every session of the user's deleted with the reason given, and then **the push** to their open pages (`Macaw.Auth.announce_revoked/2`), **unless option `announce: false`,** for a process that is not the app's node (a mix task, a release's `eval`), which has no page to tell: the pages leave at their next re-check ([03 §4](03-live.md#auth-live-recheck)). `:ok`.
+
+```test:sessions-revoke-all
+revoke_all of a user with a session, through set_password/3 and admin_reset/2: the token no longer resolves; a subscriber hears {:sessions_revoked, [_]}, and nothing with announce: false
+```
+
 ```test:sessions-list
 sessions made at 0, three at 10, at 20 and another user's at 30 list as the one at 20, the three tied in descending id order, then the one at 0
 ```

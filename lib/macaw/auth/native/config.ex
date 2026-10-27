@@ -210,9 +210,29 @@ defmodule Macaw.Auth.Native.Config do
   @doc "Reads and parses the application's configuration; raises `Error` naming the fault."
   @spec load!() :: t()
   def load! do
-    case parse(Application.get_env(:macaw_auth, Macaw.Auth.Native, [])) do
+    case read() do
       {:ok, config} -> put(config)
-      {:error, message} -> raise Error, "config :macaw_auth, Macaw.Auth.Native: " <> message
+      {:error, message} -> raise Error, message
+    end
+  end
+
+  @doc """
+  The configuration as `get/0` has it, but a fault is `{:error, message}`,
+  not raised: for a command line (`mix macaw_auth.user`, a release's
+  entry point), which answers it as one line.
+  """
+  @spec fetch() :: {:ok, t()} | {:error, String.t()}
+  def fetch do
+    case :persistent_term.get(__MODULE__, nil) do
+      nil -> with {:ok, config} <- read(), do: {:ok, put(config)}
+      config -> {:ok, config}
+    end
+  end
+
+  defp read do
+    case parse(Application.get_env(:macaw_auth, Macaw.Auth.Native, [])) do
+      {:ok, config} -> {:ok, config}
+      {:error, message} -> {:error, "config :macaw_auth, Macaw.Auth.Native: " <> message}
     end
   end
 
