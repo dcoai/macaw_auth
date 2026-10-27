@@ -3,6 +3,11 @@ defmodule Macaw.Auth.Test.MemoryBackend do
   A backend that keeps users and sessions in ETS: the smallest correct
   implementation of `Macaw.Auth.Backend`, which proves the contract, the
   plugs and the hooks without a database. Tokens are stored as SHA-256.
+
+  Its second factor is TOTP (`NimbleTOTP`, ±1 step) with the same replay
+  guard as the native backend's: the last accepted step is replaced only
+  by a later one, atomically (`:ets.select_replace/2`). No throttle and no
+  recovery codes: the kit doesn't ask for them.
   """
 
   @behaviour Macaw.Auth.Backend
@@ -12,6 +17,7 @@ defmodule Macaw.Auth.Test.MemoryBackend do
 
   @users __MODULE__.Users
   @sessions __MODULE__.Sessions
+  @factors __MODULE__.Factors
   @idle 3_600
   @touch_every 300
 
@@ -19,7 +25,7 @@ defmodule Macaw.Auth.Test.MemoryBackend do
 
   @impl Macaw.Auth.Conformance.Fixtures
   def reset! do
-    for t <- [@users, @sessions] do
+    for t <- [@users, @sessions, @factors] do
       if :ets.whereis(t) == :undefined,
         do: :ets.new(t, [:named_table, :public, :set]),
         else: :ets.delete_all_objects(t)
@@ -52,6 +58,18 @@ defmodule Macaw.Auth.Test.MemoryBackend do
     :ets.insert(@users, {name, %{user | disabled: true}, hash})
     :ok
   end
+
+  @impl Macaw.Auth.Conformance.Fixtures
+  def enroll_second_factor!(%User{username: name, id: id}) do
+    secret = NimbleTOTP.secret()
+    # Confirmed with the previous step's code, so the current one is unspent.
+    :ets.insert(@factors, {id, secret, step(System.os_time(:second)) - 1})
+    [{^name, user, hash}] = :ets.lookup(@users, name)
+    :ets.insert(@users, {name, %{user | second_factor: :enrolled}, hash})
+    fn -> NimbleTOTP.verification_code(secret) end
+  end
+
+  defp step(seconds), do: div(seconds, 30)
 
   @impl Macaw.Auth.Conformance.Fixtures
   def idle_seconds, do: @idle
@@ -183,6 +201,36 @@ defmodule Macaw.Auth.Test.MemoryBackend do
     :ets.insert(@sessions, {h, s})
     :ok
   end
+
+  @impl Macaw.Auth.Backend
+  def verify_second_factor(session_id, code, opts) do
+    with {:ok, user, _session} <- fetch_session_by_id(session_id, touch: false),
+         [{_, secret, last}] <- :ets.lookup(@factors, user.id),
+         {:ok, step} <- matching_step(secret, code, opts, last),
+         1 <-
+           :ets.select_replace(@factors, [
+             {{user.id, secret, :"$1"}, [{:<, :"$1", step}], [{{user.id, secret, step}}]}
+           ]) do
+      complete_step(session_id, :second_factor, opts)
+    else
+      {:error, reason} when reason in [:invalid, :expired, :disabled] -> {:error, reason}
+      _ -> {:error, :invalid_code}
+    end
+  end
+
+  defp matching_step(secret, code, opts, last) when is_binary(code) do
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0) |> DateTime.to_unix()
+
+    Enum.find_value([-1, 0, 1], :error, fn offset ->
+      step = step(now) + offset
+
+      if step > last and
+           Plug.Crypto.secure_compare(NimbleTOTP.verification_code(secret, time: step * 30), code),
+         do: {:ok, step}
+    end)
+  end
+
+  defp matching_step(_secret, _code, _opts, _last), do: :error
 
   defp user_by_id(id) do
     Enum.find_value(:ets.tab2list(@users), fn {_, u, _} -> if u.id == id, do: u end)

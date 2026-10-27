@@ -1,7 +1,7 @@
 defmodule Macaw.Auth.MixProject do
   use Mix.Project
 
-  @version "0.1.0-dev"
+  @version "0.1.0"
 
   def project do
     [
@@ -34,6 +34,7 @@ defmodule Macaw.Auth.MixProject do
       {:macaw_plug, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_plug.git", tag: "v0.1.0"},
       {:plug, "~> 1.16"},
       {:telemetry, "~> 1.2"},
+      {:nimble_totp, "~> 1.0"},
       {:ecto_sql, "~> 3.12"},
       {:bcrypt_elixir, "~> 3.2", optional: true},
       {:argon2_elixir, "~> 4.1", optional: true},

@@ -59,4 +59,15 @@ defmodule Macaw.Auth.Backend do
 
   @doc "Records that a session has completed a step (`:second_factor`, `:password_change`)."
   @callback complete_step(term(), Macaw.Auth.step(), opts()) :: :ok
+
+  @doc """
+  Checks a second-factor code for the user of a session (a TOTP code or a
+  recovery code); on success completes the session's `:second_factor`
+  step. A code is accepted once: the same code again is refused. A
+  backend throttles these attempts as it does sign-ins. `:ok`, or
+  `{:error, :invalid_code | :throttled}`, or the session's own refusal.
+  Options: `:remote_ip`, `:now`.
+  """
+  @callback verify_second_factor(term(), term(), opts()) ::
+              :ok | {:error, :invalid_code | :throttled | :invalid | :expired | :disabled}
 end

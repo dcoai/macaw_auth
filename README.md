@@ -10,9 +10,9 @@ Authentication for Phoenix hosts, implemented once for the Macaw family's host a
 | `Macaw.Auth.Live` | LiveView `on_mount` hooks that disconnect a page the moment its session is revoked |
 | `Macaw.Auth.Conformance` | the kit every backend runs |
 
-Backends: `Macaw.Auth.Native` (passwords, LDAP, hashed sessions, throttling, TOTP; in progress) and `macaw_auth_ash` (AshAuthentication; later).
+Backends: `Macaw.Auth.Native` (passwords, LDAP, hashed sessions, throttling, TOTP) and `macaw_auth_ash` (AshAuthentication; later).
 
-The native backend so far: users and sessions in the host's repo (`mix macaw_auth.gen.migration` writes the `macaw_auth_users` and `macaw_auth_sessions` migrations), and `authenticate/2` through a chain of sources tried in order, where the first that knows the user decides: local password hashes (bcrypt or argon2, rehashed at sign-in) and LDAP directories over OTP's `:eldap` (TLS verified, plaintext refused unless allowed, directory users provisioned at first sign-in with their roles re-derived at every one). `mix macaw_auth.ldap.check SOURCE USERNAME` walks a directory sign-in step by step. Sessions store only a SHA-256 of their 32-byte token, expire after `session_idle_days` (default 14) unused, and record use at most hourly; sign-in failures back off per username and per client address (2^(n-5) s after five, capped at 15 minutes). The second factor comes next.
+The native backend: users and sessions in the host's repo (`mix macaw_auth.gen.migration` writes the `macaw_auth_users`, `macaw_auth_sessions` and second-factor migrations, only those a host lacks), and `authenticate/2` through a chain of sources tried in order, where the first that knows the user decides: local password hashes (bcrypt or argon2, rehashed at sign-in) and LDAP directories over OTP's `:eldap` (TLS verified, plaintext refused unless allowed, directory users provisioned at first sign-in with their roles re-derived at every one). `mix macaw_auth.ldap.check SOURCE USERNAME` walks a directory sign-in step by step. Sessions store only a SHA-256 of their 32-byte token, expire after `session_idle_days` (default 14) unused, and record use at most hourly; sign-in failures back off per username and per client address (2^(n-5) s after five, capped at 15 minutes). The second factor is TOTP (RFC 6238 via `nimble_totp`, ±1 step, each step accepted once by a conditional update) with ten single-use recovery codes stored as SHA-256; the secret is sealed at rest with AES-256-GCM under `sealing_key`, and code attempts go through the same throttle. `totp_required` (`true` or a list of roles) makes a user who hasn't enrolled owe enrollment. `Macaw.Auth.Native.enroll_begin/2`, `enroll_confirm/3`, `disable/3`, `admin_reset/2`, `regenerate_recovery_codes/2`, and `Macaw.Auth.Plug.verify_second_factor/2` for the step's page.
 
 Phoenix and LiveView are required dependencies: the plugs redirect with `Phoenix.Controller` and flash a refused role, so the browser pipeline needs `fetch_flash`.
 
@@ -21,6 +21,9 @@ config :macaw_auth, Macaw.Auth.Native,
   repo: MyApp.Repo,
   hasher: Macaw.Auth.Native.Hasher.Bcrypt,   # add {:bcrypt_elixir, "~> 3.2"} (or Argon2 and {:argon2_elixir, "~> 4.1"})
   session_idle_days: 14,
+  totp_issuer: "My App",
+  totp_required: ["admin"],                    # or true, or false (the default)
+  sealing_key: {MyApp.Secrets, :sealing_key, []},   # or a binary of >= 32 bytes
   sources: [
     %{type: :password},
     %{type: :ldap, name: "nas", host: "nas.example.test", port: 389, ssl: false, starttls: true,

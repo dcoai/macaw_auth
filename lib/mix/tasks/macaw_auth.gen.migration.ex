@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.MacawAuth.Gen.Migration do
-  @shortdoc "Writes the migrations creating macaw_auth_users and macaw_auth_sessions"
+  @shortdoc "Writes the migrations for the native backend's tables (users, sessions, second factor)"
 
   @moduledoc """
   Writes the migrations that create the native backend's tables into the
@@ -8,7 +8,10 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
   - `create_macaw_auth_users`: `macaw_auth_users`
     (`Macaw.Auth.Native.UserRecord`);
   - `create_macaw_auth_sessions`: `macaw_auth_sessions`
-    (`Macaw.Auth.Native.SessionRecord`), referencing the users.
+    (`Macaw.Auth.Native.SessionRecord`), referencing the users;
+  - `add_macaw_auth_second_factor`: the second factor's columns on
+    `macaw_auth_users` and the `macaw_auth_recovery_codes` table
+    (`Macaw.Auth.Native.Totp`, `Macaw.Auth.Native.RecoveryCodeRecord`).
 
       mix macaw_auth.gen.migration
       mix macaw_auth.gen.migration --repo MyApp.Repo --migrations-path priv/repo/migrations
@@ -17,10 +20,10 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
   :macaw_auth, Macaw.Auth.Native, repo: MyApp.Repo`); it is only written
   into the files as text. The path defaults to `priv/repo/migrations`.
 
-  Each table has its own file, and the task writes only those not yet
-  there: a host that has the users migration gets the sessions one added
-  after it, and a host that has both is refused, so no table is ever
-  created twice. Files are timestamped like `mix ecto.gen.migration`'s,
+  Each has its own file, and the task writes only those not yet there: a
+  host that has the users and sessions migrations gets the second
+  factor's added after them, and a host that has all three is refused, so
+  no table or column is ever created twice. Files are timestamped like `mix ecto.gen.migration`'s,
   one second apart, so they run in order.
 
   The migrations are plain DDL the host owns and can read, and they are
@@ -35,7 +38,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
   @switches [repo: :string, migrations_path: :string]
   @migrations [
     {"create_macaw_auth_users", :users},
-    {"create_macaw_auth_sessions", :sessions}
+    {"create_macaw_auth_sessions", :sessions},
+    {"add_macaw_auth_second_factor", :second_factor}
   ]
 
   @impl true
@@ -183,6 +187,45 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
 
         create unique_index(:macaw_auth_sessions, [:token_hash])
         create index(:macaw_auth_sessions, [:user_id])
+      end
+    end
+    """
+  end
+
+  def migration(:second_factor, repo) do
+    """
+    defmodule #{repo}.Migrations.AddMacawAuthSecondFactor do
+      # Written by `mix macaw_auth.gen.migration`: the native backend's
+      # second factor (Macaw.Auth.Native.Totp). The TOTP secret is stored
+      # sealed (AES-256-GCM under the configured sealing_key), and recovery
+      # codes only as SHA-256, so reading these tables passes nobody's
+      # second factor.
+      use Ecto.Migration
+
+      def change do
+        alter table(:macaw_auth_users) do
+          # The sealed secret; set while enrollment is pending, too.
+          add :totp_secret_sealed, :binary
+          # Set when enrollment was confirmed: the second factor is on.
+          add :totp_enabled_at, :utc_datetime_usec
+          # The last 30-second step a code was accepted for: no code is
+          # accepted twice.
+          add :totp_last_step, :bigint
+        end
+
+        create table(:macaw_auth_recovery_codes, primary_key: false) do
+          add :id, :binary_id, primary_key: true
+
+          add :user_id, references(:macaw_auth_users, type: :binary_id, on_delete: :delete_all),
+            null: false
+
+          # SHA-256 of the code; a spent code's row is deleted.
+          add :code_hash, :binary, null: false
+
+          timestamps(type: :utc_datetime_usec, updated_at: false)
+        end
+
+        create unique_index(:macaw_auth_recovery_codes, [:user_id, :code_hash])
       end
     end
     """

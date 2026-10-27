@@ -22,6 +22,17 @@ defmodule Macaw.Auth.Native.Config do
     the `source` of the rows it provisions.
   - `session_idle_days`: how long a session may go unused before it
     expires (`Macaw.Auth.Native.Sessions`), 1–3650; default 14.
+  - `totp_issuer`: the name an authenticator app shows for this site's
+    codes (`Macaw.Auth.Native.Totp`); default `"Macaw"`.
+  - `totp_required`: whether policy requires a second factor: `false`
+    (the default), `true` (everyone), or a list of roles (a user with any
+    of them). A user it requires who hasn't enrolled owes enrollment
+    (`second_factor: :required`).
+  - `sealing_key`: what TOTP secrets are sealed with at rest
+    (`Macaw.Auth.Native.Seal`): a binary of at least 32 bytes, or
+    `{module, function, args}` returning one. A literal shorter key is
+    refused here; a missing one, or a function's short result, at first
+    use. Never shown by `inspect`.
 
   A source map may use string keys and a string `type`, as a JSON or
   `config.exs` file writes it; those become atoms only by lookup among the
@@ -32,19 +43,31 @@ defmodule Macaw.Auth.Native.Config do
   `:persistent_term` for `get/0`.
   """
 
-  alias Macaw.Auth.Native.{Hasher, Settings, Source}
+  alias Macaw.Auth.Native.{Hasher, Seal, Settings, Source}
 
   @enforce_keys [:repo, :hasher, :sources]
-  defstruct [:repo, :hasher, :sources, session_idle_days: 14]
+  @derive {Inspect, except: [:sealing_key]}
+  defstruct [
+    :repo,
+    :hasher,
+    :sources,
+    :sealing_key,
+    session_idle_days: 14,
+    totp_issuer: "Macaw",
+    totp_required: false
+  ]
 
   @type t :: %__MODULE__{
           repo: module(),
           hasher: module(),
           sources: [Source.t()],
-          session_idle_days: pos_integer()
+          session_idle_days: pos_integer(),
+          totp_issuer: String.t(),
+          totp_required: boolean() | [String.t()],
+          sealing_key: Seal.key_source()
         }
 
-  @keys [:repo, :hasher, :sources, :session_idle_days]
+  @keys [:repo, :hasher, :sources, :session_idle_days, :totp_issuer, :totp_required, :sealing_key]
   @types %{password: Source.Password, ldap: Source.Ldap}
 
   defmodule Error do
@@ -69,16 +92,63 @@ defmodule Macaw.Auth.Native.Config do
              Map.get(config, :sources, [%{type: :password}]),
              Keyword.merge(opts, repo: repo, hasher: hasher)
            ),
-         {:ok, idle_days} <- idle_days(Map.get(config, :session_idle_days, 14)) do
+         {:ok, idle_days} <- idle_days(Map.get(config, :session_idle_days, 14)),
+         {:ok, issuer} <- issuer(Map.get(config, :totp_issuer, "Macaw")),
+         {:ok, required} <- required(Map.get(config, :totp_required, false)),
+         {:ok, sealing_key} <- sealing_key(Map.get(config, :sealing_key)) do
       {:ok,
        %__MODULE__{
          repo: repo,
          hasher: hasher,
          sources: sources,
-         session_idle_days: idle_days
+         session_idle_days: idle_days,
+         totp_issuer: issuer,
+         totp_required: required,
+         sealing_key: sealing_key
        }}
     end
   end
+
+  # The issuer is the otpauth label's prefix, where a colon separates it
+  # from the account name.
+  defp issuer(issuer) when is_binary(issuer) and issuer != "" do
+    if String.contains?(issuer, ":"),
+      do: {:error, "totp_issuer: must not contain a colon"},
+      else: {:ok, issuer}
+  end
+
+  defp issuer(other),
+    do: {:error, "totp_issuer: must be a non-empty string, got #{inspect(other)}"}
+
+  defp required(required) when is_boolean(required), do: {:ok, required}
+
+  defp required(roles) when is_list(roles) do
+    if roles != [] and Enum.all?(roles, &(is_binary(&1) and &1 != "")),
+      do: {:ok, roles},
+      else: {:error, "totp_required: a list of roles must be non-empty role names (strings)"}
+  end
+
+  defp required(other),
+    do: {:error, "totp_required: must be false, true or a list of roles, got #{inspect(other)}"}
+
+  # Never inspected: a value here may be the key itself.
+  defp sealing_key(nil), do: {:ok, nil}
+
+  defp sealing_key(key) when is_binary(key) do
+    if byte_size(key) >= Seal.min_bytes(),
+      do: {:ok, key},
+      else: {:error, "sealing_key: must be at least #{Seal.min_bytes()} bytes"}
+  end
+
+  defp sealing_key({module, function, args} = mfa)
+       when is_atom(module) and is_atom(function) and is_list(args),
+       do: {:ok, mfa}
+
+  defp sealing_key(_other),
+    do:
+      {:error,
+       "sealing_key: must be a binary of at least #{Seal.min_bytes()} bytes, " <>
+         "or {module, function, args} returning one"}
 
   defp idle_days(days) when is_integer(days) and days in 1..3650, do: {:ok, days}
 

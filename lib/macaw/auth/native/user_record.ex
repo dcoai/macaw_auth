@@ -19,8 +19,13 @@ defmodule Macaw.Auth.Native.UserRecord do
   - `extra` holds what a source knows beyond these (an LDAP DN, its id
     attribute, email) and the host's own fields.
 
-  The second-factor columns arrive with their work item (#52), in their
-  own migration.
+  - `totp_secret_sealed`, `totp_enabled_at`, `totp_last_step`: the second
+    factor (`Macaw.Auth.Native.Totp`), added by their own migration. The
+    secret is sealed (`Macaw.Auth.Native.Seal`), never stored as it is;
+    an enrollment is pending while `totp_enabled_at` is nil; the last
+    accepted step is what makes a code single-use. None of them is cast
+    by `changeset/2`: only `Totp` writes them, each by a conditional
+    update.
   """
 
   use Ecto.Schema
@@ -39,6 +44,9 @@ defmodule Macaw.Auth.Native.UserRecord do
     field(:disabled_at, :utc_datetime_usec)
     field(:must_change_password, :boolean, default: false)
     field(:extra, :map, default: %{})
+    field(:totp_secret_sealed, :binary, redact: true)
+    field(:totp_enabled_at, :utc_datetime_usec)
+    field(:totp_last_step, :integer)
 
     timestamps()
   end

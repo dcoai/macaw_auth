@@ -114,6 +114,15 @@ defmodule Macaw.Auth do
     do: backend().complete_step(session_id, step, opts)
 
   @doc """
+  Checks a second-factor code for session `session_id`'s user; on success
+  the session's `:second_factor` step is complete. Options: `:remote_ip`
+  (for the throttle), `:now`.
+  """
+  @spec verify_second_factor(term(), term(), keyword()) :: :ok | {:error, atom()}
+  def verify_second_factor(session_id, code, opts \\ []),
+    do: backend().verify_second_factor(session_id, code, opts)
+
+  @doc """
   Revokes one session (an id) or all of a user's (`{:user, id}`, with
   `:except`), and tells their open pages, which disconnect.
   """

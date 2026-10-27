@@ -125,6 +125,37 @@ defmodule Macaw.Auth.PlugTest do
     assert conn.assigns.pending_step == nil
   end
 
+  test "verify_second_factor with a valid code completes the step and goes where it was going" do
+    {user, creds} = Mem.user!(%{})
+    next_code = Mem.enroll_second_factor!(user)
+    {:ok, user} = Auth.authenticate(creds)
+    {:ok, token, _} = Auth.create_session(user)
+
+    session = %{AuthPlug.token_key() => token, "macaw_auth_return_to" => "/reports"}
+    conn = request("/login/totp", session)
+    assert conn.assigns.pending_step == :second_factor
+
+    assert {:ok, conn} = AuthPlug.verify_second_factor(conn, next_code.())
+    assert location(conn) == "/reports"
+    assert conn.assigns.pending_step == nil
+    {:ok, user, session} = Auth.fetch(token)
+    assert Auth.pending_step(user, session) == nil
+  end
+
+  test "verify_second_factor with a wrong code stays, with the reason" do
+    {user, creds} = Mem.user!(%{})
+    _next_code = Mem.enroll_second_factor!(user)
+    {:ok, user} = Auth.authenticate(creds)
+    {:ok, token, _} = Auth.create_session(user)
+
+    conn = request("/login/totp", %{AuthPlug.token_key() => token})
+    assert {:error, :invalid_code, conn} = AuthPlug.verify_second_factor(conn, "not a code")
+    refute conn.halted
+    assert conn.assigns.pending_step == :second_factor
+
+    assert {:error, :invalid, _} = AuthPlug.verify_second_factor(request("/login/totp"), "1")
+  end
+
   test "log_out revokes the session and tells its open pages" do
     {user, _} = Mem.user!(%{})
     {:ok, token, session} = Auth.create_session(user)

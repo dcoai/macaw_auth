@@ -23,8 +23,11 @@ defmodule Macaw.Auth.Native do
     username and per client address;
   - `Macaw.Auth.Native.Sessions`: hashed session tokens, idle expiry,
     steps;
-  - `Macaw.Auth.Native.UserRecord` and `Macaw.Auth.Native.SessionRecord`:
-    the `macaw_auth_users` and `macaw_auth_sessions` schemas.
+  - `Macaw.Auth.Native.Totp`: the second factor, TOTP and recovery codes,
+    its secret sealed at rest (`Macaw.Auth.Native.Seal`);
+  - `Macaw.Auth.Native.UserRecord`, `Macaw.Auth.Native.SessionRecord` and
+    `Macaw.Auth.Native.RecoveryCodeRecord`: the `macaw_auth_users`,
+    `macaw_auth_sessions` and `macaw_auth_recovery_codes` schemas.
 
   **One refusal.** Whatever a source's reason, the caller sees
   `:invalid_credentials`, or `:disabled` for a disabled user who gave
@@ -33,13 +36,27 @@ defmodule Macaw.Auth.Native do
   (`[:macaw_auth, :native, :authenticate]`) and to
   `mix macaw_auth.ldap.check`.
 
-  The second factor (`Macaw.Auth.User`'s `second_factor`) arrives with its
-  work item (#52); until then every native user's is `:none`.
+  **The second factor.** A user's `second_factor` is `:enrolled` once they
+  confirm a TOTP enrollment, else `:required` when policy
+  (`totp_required`) requires one, else `:none`; `Macaw.Auth.pending_step/2`
+  turns that into the step a session owes. The enrollment and
+  verification functions here put every code check behind the throttle:
+  a wrong code is a failure for the user's second-factor key and the
+  client's address, with the same backoff as a wrong password, so six
+  digits can't be guessed. The second factor's username key is its own
+  (a password success doesn't reset it, or each sign-in would buy a
+  guesser who has the password five more free guesses at the code); the
+  address key is the one sign-in uses. Configure it with:
+
+      config :macaw_auth, Macaw.Auth.Native,
+        totp_issuer: "My App",
+        totp_required: ["admin"],            # or true, or false (the default)
+        sealing_key: {MyApp.Secrets, :sealing_key, []}
   """
 
   @behaviour Macaw.Auth.Backend
 
-  alias Macaw.Auth.Native.{Config, Sessions, Source, Throttle, UserRecord}
+  alias Macaw.Auth.Native.{Config, Sessions, Source, Throttle, Totp, UserRecord}
   alias Macaw.Auth.User
 
   @doc """
@@ -143,10 +160,106 @@ defmodule Macaw.Auth.Native do
   @impl Macaw.Auth.Backend
   defdelegate complete_step(session_id, step, opts), to: Sessions
 
-  @doc "A users row as the contract's `%Macaw.Auth.User{}`."
+  # ── The second factor ─────────────────────────────────────────────────
+
+  @doc """
+  Checks a second-factor code (TOTP, or a recovery code) for the user of
+  session `session_id`, behind the throttle; on success the session's
+  `:second_factor` step is completed. `:ok`, or `{:error, :invalid_code |
+  :throttled}`, or the session's own refusal (`:invalid | :expired |
+  :disabled`). Options: `:remote_ip`, `:now`.
+  """
+  @impl Macaw.Auth.Backend
+  @spec verify_second_factor(term(), term(), keyword()) ::
+          :ok | {:error, :invalid_code | :throttled | :invalid | :expired | :disabled}
+  def verify_second_factor(session_id, code, opts \\ []) do
+    with {:ok, user, _session} <-
+           Sessions.fetch_by_id(session_id, Keyword.put(opts, :touch, false)),
+         :ok <- throttled(user, opts, fn -> Totp.verify(user, code, opts) end) do
+      Sessions.complete_step(session_id, :second_factor, opts)
+    end
+  end
+
+  @doc """
+  Starts (or resumes) `user`'s TOTP enrollment: `{:ok, %{secret, uri}}`,
+  the `otpauth://` URI for the page's QR code. Not active until
+  `enroll_confirm/3`. See `Macaw.Auth.Native.Totp.enroll_begin/2`.
+  """
+  @spec enroll_begin(User.t(), keyword()) ::
+          {:ok, %{secret: binary(), uri: String.t()}} | {:error, :already_enrolled | :not_found}
+  def enroll_begin(%User{} = user, opts \\ []), do: Totp.enroll_begin(user, opts)
+
+  @doc """
+  Confirms the enrollment with a valid code, behind the throttle:
+  `{:ok, recovery_codes}` to show once, or `{:error, :invalid_code |
+  :throttled | :not_started | :already_enrolled}`. A session that owed
+  `:second_factor_enroll` then completes it (`Macaw.Auth.Plug.complete_step/2`).
+  """
+  @spec enroll_confirm(User.t(), term(), keyword()) ::
+          {:ok, [String.t()]}
+          | {:error, :invalid_code | :throttled | :not_started | :already_enrolled}
+  def enroll_confirm(%User{} = user, code, opts \\ []),
+    do: throttled(user, opts, fn -> Totp.enroll_confirm(user, code, opts) end)
+
+  @doc """
+  The user turns their second factor off with a current code or a recovery
+  code, behind the throttle: `:ok`, or `{:error, :invalid_code |
+  :throttled | :required}`.
+  """
+  @spec disable(User.t(), term(), keyword()) ::
+          :ok | {:error, :invalid_code | :throttled | :required}
+  def disable(%User{} = user, code, opts \\ []),
+    do: throttled(user, opts, fn -> Totp.disable(user, code, opts) end)
+
+  @doc "An administrator clears a user's second factor and revokes their sessions."
+  @spec admin_reset(User.t() | term(), keyword()) :: :ok
+  defdelegate admin_reset(user, opts \\ []), to: Totp
+
+  @doc "Replaces an enrolled user's recovery codes: `{:ok, codes}` or `{:error, :not_enrolled}`."
+  @spec regenerate_recovery_codes(User.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, :not_enrolled}
+  defdelegate regenerate_recovery_codes(user, opts \\ []), to: Totp
+
+  @doc "How many unspent recovery codes the user has."
+  @spec recovery_codes_left(User.t() | term()) :: non_neg_integer()
+  defdelegate recovery_codes_left(user), to: Totp
+
+  # A code check behind the throttle: refused unchecked while the user's
+  # second-factor key or the address waits; a wrong code is a failure, an
+  # accepted one resets the user's key.
+  defp throttled(%User{username: username}, opts, check) do
+    key = {:second_factor, username}
+    ip = address(Keyword.get(opts, :remote_ip))
+    now = clock(opts)
+
+    case Throttle.check(key, ip, now) do
+      {:delay, _ms} ->
+        {:error, :throttled}
+
+      :ok ->
+        case check.() do
+          {:error, :invalid_code} = refused ->
+            Throttle.failure(key, ip, now)
+            refused
+
+          {:error, _other} = error ->
+            error
+
+          success ->
+            Throttle.success(key)
+            success
+        end
+    end
+  end
+
+  @doc """
+  A users row as the contract's `%Macaw.Auth.User{}`, its `second_factor`
+  from the row and the configured policy.
+  """
   @spec to_user(UserRecord.t()) :: User.t()
   def to_user(%UserRecord{} = r) do
     %User{
+      second_factor: Totp.status(r, Config.get()),
       id: r.id,
       username: r.username,
       display_name: r.display_name,

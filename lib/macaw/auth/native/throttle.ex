@@ -42,7 +42,13 @@ defmodule Macaw.Auth.Native.Throttle do
   @idle_ms 24 * 60 * 60 * 1000
   @sweep_every_ms 10 * 60 * 1000
 
-  @type key :: {:user, String.t() | :invalid} | {:ip, String.t()}
+  @typedoc """
+  A user key holds a normalized username, `:invalid`, or
+  `{:second_factor, username}` (code attempts, counted apart from
+  passwords: `Macaw.Auth.Native`).
+  """
+  @type user :: String.t() | :invalid | {:second_factor, String.t()}
+  @type key :: {:user, user()} | {:ip, String.t()}
 
   @doc """
   Starts the table's owner. Options: `:sweep_every_ms` (default ten
@@ -61,7 +67,7 @@ defmodule Macaw.Auth.Native.Throttle do
   `:ok`, or `{:delay, ms}` left before `username` or `ip` may try again
   at `now`.
   """
-  @spec check(String.t() | :invalid, String.t() | nil, integer()) :: :ok | {:delay, pos_integer()}
+  @spec check(user(), String.t() | nil, integer()) :: :ok | {:delay, pos_integer()}
   def check(username, ip, now) do
     username
     |> keys(ip)
@@ -81,7 +87,7 @@ defmodule Macaw.Auth.Native.Throttle do
   end
 
   @doc "Records a failure for `username` and `ip` at `now`."
-  @spec failure(String.t() | :invalid, String.t() | nil, integer()) :: :ok
+  @spec failure(user(), String.t() | nil, integer()) :: :ok
   def failure(username, ip, now) do
     for key <- keys(username, ip) do
       # Both atomic: concurrent failures each count, and the last-failure
@@ -94,7 +100,7 @@ defmodule Macaw.Auth.Native.Throttle do
   end
 
   @doc "A success resets the username's count (not the address's)."
-  @spec success(String.t() | :invalid) :: :ok
+  @spec success(user()) :: :ok
   def success(username) do
     :ets.delete(@table, {:user, username})
     :ok

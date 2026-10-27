@@ -16,7 +16,7 @@ defmodule Macaw.Auth.Conformance do
   with `pending: [second_factor: "why"]`: the kit's tests that need it
   are then skipped, and say so in every test run's summary, rather than
   removed or passed by a fixture that pretends. The only capability so
-  far is `:second_factor` (a user with one enrolled).
+  far is `:second_factor` (enrolling, verifying and requiring one).
 
   The kit checks:
   - valid credentials sign in; a wrong password and an unknown user are the
@@ -27,8 +27,12 @@ defmodule Macaw.Auth.Conformance do
     subscribed process** (an open page) which ids ended;
   - an idle session expires, and a re-check (`touch: false`) never extends
     one; a disabled user's live session is refused;
+  - a user's sessions list newest first;
   - a user with a second factor owes it, and completing the step clears it;
-  - a user's sessions list newest first.
+    a user enrolled through the fixture is reported `:enrolled`; a valid
+    code passes the step (`Macaw.Auth.verify_second_factor/3`), a wrong
+    one doesn't, and **a code is accepted once**; a user whom policy
+    requires to have one owes enrollment.
   """
 
   defmodule Fixtures do
@@ -51,6 +55,16 @@ defmodule Macaw.Auth.Conformance do
 
     @doc "Every value the backend stores for sessions (to prove no token is stored as is)."
     @callback stored_session_values() :: [binary()]
+
+    @doc """
+    Enrolls `user` in the backend's second factor, the way a user would
+    (begin, then confirm with a valid code), and returns a function that
+    gives a code the backend accepts at the moment it is called and has
+    not yet accepted: a fresh device's current code. (A fixture that
+    confirmed with the current step's code should have confirmed with the
+    previous step's, so the current one is still unspent.)
+    """
+    @callback enroll_second_factor!(Macaw.Auth.User.t()) :: (-> String.t())
   end
 
   defmacro __using__(opts) do
@@ -200,8 +214,16 @@ defmodule Macaw.Auth.Conformance do
       end
 
       describe "conformance: steps" do
+        test "a user without a second factor owes nothing" do
+          {user, _} = @fixtures.user!(%{})
+          {:ok, _token, session} = Auth.create_session(user)
+          assert Auth.pending_step(user, session) == nil
+        end
+      end
+
+      describe "conformance: second factor" do
         if @second_factor_pending,
-          do: @tag(skip: "pending (second factor): " <> @second_factor_pending)
+          do: @describetag(skip: "pending (second factor): " <> @second_factor_pending)
 
         test "an enrolled second factor is owed until completed" do
           {user, creds} = @fixtures.user!(%{second_factor: :enrolled})
@@ -214,12 +236,61 @@ defmodule Macaw.Auth.Conformance do
           assert Auth.pending_step(user, session) == nil
         end
 
-        test "a user without one owes nothing" do
-          {user, _} = @fixtures.user!(%{})
-          {:ok, _token, session} = Auth.create_session(user)
+        test "an enrolled user is reported so, and a valid code passes the step" do
+          {user, creds} = @fixtures.user!(%{})
+          next_code = @fixtures.enroll_second_factor!(user)
+          {:ok, user} = Auth.authenticate(creds)
+          assert user.second_factor == :enrolled
+
+          {:ok, token, session} = Auth.create_session(user)
+          assert Auth.pending_step(user, session) == :second_factor
+
+          assert Auth.verify_second_factor(session.id, next_code.()) == :ok
+          {:ok, user, session} = Auth.fetch(token)
+          assert Auth.pending_step(user, session) == nil
+        end
+
+        test "a wrong code is refused, and the step is still owed" do
+          {user, creds} = @fixtures.user!(%{})
+          next_code = @fixtures.enroll_second_factor!(user)
+          {:ok, user} = Auth.authenticate(creds)
+          {:ok, token, session} = Auth.create_session(user)
+
+          assert {:error, _} = Auth.verify_second_factor(session.id, wrong(next_code.()))
+          {:ok, user, session} = Auth.fetch(token)
+          assert Auth.pending_step(user, session) == :second_factor
+        end
+
+        test "a code is accepted once" do
+          {user, creds} = @fixtures.user!(%{})
+          next_code = @fixtures.enroll_second_factor!(user)
+          {:ok, user} = Auth.authenticate(creds)
+          {:ok, _, first} = Auth.create_session(user)
+          {:ok, token, second} = Auth.create_session(user)
+          code = next_code.()
+
+          assert Auth.verify_second_factor(first.id, code) == :ok
+          assert {:error, _} = Auth.verify_second_factor(second.id, code)
+          {:ok, user, session} = Auth.fetch(token)
+          assert Auth.pending_step(user, session) == :second_factor
+        end
+
+        test "a user whom policy requires to have one owes enrollment" do
+          {user, creds} = @fixtures.user!(%{second_factor: :required})
+          {:ok, user} = Auth.authenticate(creds)
+          assert user.second_factor == :required
+          {:ok, token, session} = Auth.create_session(user)
+          assert Auth.pending_step(user, session) == :second_factor_enroll
+
+          :ok = Auth.complete_step(session.id, :second_factor_enroll)
+          {:ok, user, session} = Auth.fetch(token)
           assert Auth.pending_step(user, session) == nil
         end
       end
+
+      # Every digit changed, so the code differs from the valid one.
+      defp wrong(code),
+        do: for(<<d <- code>>, into: "", do: <<?0 + rem(d - ?0 + 5, 10)>>)
     end
   end
 end

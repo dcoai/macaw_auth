@@ -21,6 +21,10 @@ defmodule Macaw.Auth.Plug do
   going) and a session that owes a step to that step's page; only the
   step's page and sign-out are reachable meanwhile.
 
+  The second factor's page calls `verify_second_factor/2` with the
+  submitted code; enrollment's page, after the backend confirms it,
+  `complete_step(conn, :second_factor_enroll)`.
+
   Run `Macaw.Plug.ClientIp` before these, so a session records, and the
   throttle counts, the client's address, not a proxy's. Run `fetch_flash`
   before `require_role/2`, or its refusal goes home without saying why.
@@ -160,6 +164,38 @@ defmodule Macaw.Auth.Plug do
 
       {:error, _} ->
         log_out(conn)
+    end
+  end
+
+  @doc """
+  Checks a second-factor code for the current session, passing the
+  client's address for the backend's throttle. On success the
+  `:second_factor` step is complete and the browser goes on, to the next
+  step or where it was going: `{:ok, conn}` (redirected, halted). On a
+  refusal the conn stays for the app's page to render the reason:
+  `{:error, reason, conn}` (`:invalid_code`, `:throttled`, or the
+  session's own refusal), and with no current session
+  `{:error, :invalid, conn}`.
+
+      def create(conn, %{"code" => code}) do
+        case Macaw.Auth.Plug.verify_second_factor(conn, code) do
+          {:ok, conn} -> conn
+          {:error, reason, conn} -> render(conn, :new, error: reason)
+        end
+      end
+  """
+  @spec verify_second_factor(Plug.Conn.t(), term()) ::
+          {:ok, Plug.Conn.t()} | {:error, atom(), Plug.Conn.t()}
+  def verify_second_factor(conn, code) do
+    case conn.assigns[:current_session] do
+      nil ->
+        {:error, :invalid, conn}
+
+      session ->
+        case Auth.verify_second_factor(session.id, code, remote_ip: client_ip(conn)) do
+          :ok -> {:ok, complete_step(conn, :second_factor)}
+          {:error, reason} -> {:error, reason, conn}
+        end
     end
   end
 
