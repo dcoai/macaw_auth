@@ -37,8 +37,12 @@ defmodule Macaw.Auth.MixProject do
       {:ecto_sql, "~> 3.12"},
       {:bcrypt_elixir, "~> 3.2", optional: true},
       {:argon2_elixir, "~> 4.1", optional: true},
-      {:phoenix_live_view, "~> 1.0", optional: true},
-      {:phoenix_pubsub, "~> 2.1", optional: true},
+      # Required (owner decision 2026-10-27, macaw_compose#32): every host is a
+      # Phoenix app, so the plugs use Phoenix.Controller and the hooks always
+      # compile.
+      {:phoenix, "~> 1.7"},
+      {:phoenix_live_view, "~> 1.0"},
+      {:phoenix_pubsub, "~> 2.1"},
       {:ecto_sqlite3, "~> 0.17", only: :test},
       {:stream_data, "~> 1.1", only: :test}
     ]

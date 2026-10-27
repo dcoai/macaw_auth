@@ -20,6 +20,8 @@ defmodule Macaw.Auth.Native.Config do
     (`Macaw.Auth.Native.Source.Password`) and `:ldap`
     (`Macaw.Auth.Native.Source.Ldap.Config`). Names are unique: a name is
     the `source` of the rows it provisions.
+  - `session_idle_days`: how long a session may go unused before it
+    expires (`Macaw.Auth.Native.Sessions`), 1–3650; default 14.
 
   A source map may use string keys and a string `type`, as a JSON or
   `config.exs` file writes it; those become atoms only by lookup among the
@@ -33,11 +35,16 @@ defmodule Macaw.Auth.Native.Config do
   alias Macaw.Auth.Native.{Hasher, Settings, Source}
 
   @enforce_keys [:repo, :hasher, :sources]
-  defstruct [:repo, :hasher, :sources]
+  defstruct [:repo, :hasher, :sources, session_idle_days: 14]
 
-  @type t :: %__MODULE__{repo: module(), hasher: module(), sources: [Source.t()]}
+  @type t :: %__MODULE__{
+          repo: module(),
+          hasher: module(),
+          sources: [Source.t()],
+          session_idle_days: pos_integer()
+        }
 
-  @keys [:repo, :hasher, :sources]
+  @keys [:repo, :hasher, :sources, :session_idle_days]
   @types %{password: Source.Password, ldap: Source.Ldap}
 
   defmodule Error do
@@ -61,10 +68,22 @@ defmodule Macaw.Auth.Native.Config do
            sources(
              Map.get(config, :sources, [%{type: :password}]),
              Keyword.merge(opts, repo: repo, hasher: hasher)
-           ) do
-      {:ok, %__MODULE__{repo: repo, hasher: hasher, sources: sources}}
+           ),
+         {:ok, idle_days} <- idle_days(Map.get(config, :session_idle_days, 14)) do
+      {:ok,
+       %__MODULE__{
+         repo: repo,
+         hasher: hasher,
+         sources: sources,
+         session_idle_days: idle_days
+       }}
     end
   end
+
+  defp idle_days(days) when is_integer(days) and days in 1..3650, do: {:ok, days}
+
+  defp idle_days(other),
+    do: {:error, "session_idle_days: must be an integer in 1..3650, got #{inspect(other)}"}
 
   defp known(config) do
     case Enum.reject(Map.keys(config), &(&1 in @keys)) do

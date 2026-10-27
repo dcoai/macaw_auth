@@ -12,6 +12,12 @@ defmodule Macaw.Auth.Conformance do
   may idle, and lists every value the backend stores for sessions, so the
   kit can prove no token is stored as it is.
 
+  A backend still being built may name a capability it doesn't have yet
+  with `pending: [second_factor: "why"]`: the kit's tests that need it
+  are then skipped, and say so in every test run's summary, rather than
+  removed or passed by a fixture that pretends. The only capability so
+  far is `:second_factor` (a user with one enrolled).
+
   The kit checks:
   - valid credentials sign in; a wrong password and an unknown user are the
     same refusal (no enumeration); a disabled user is refused;
@@ -50,6 +56,7 @@ defmodule Macaw.Auth.Conformance do
   defmacro __using__(opts) do
     backend = Keyword.fetch!(opts, :backend)
     fixtures = Keyword.fetch!(opts, :fixtures)
+    pending = Keyword.get(opts, :pending, [])
 
     quote do
       use ExUnit.Case, async: false
@@ -58,6 +65,7 @@ defmodule Macaw.Auth.Conformance do
 
       @backend unquote(backend)
       @fixtures unquote(fixtures)
+      @second_factor_pending Keyword.get(unquote(pending), :second_factor)
 
       setup do
         previous = Application.get_env(:macaw_auth, :backend)
@@ -192,6 +200,9 @@ defmodule Macaw.Auth.Conformance do
       end
 
       describe "conformance: steps" do
+        if @second_factor_pending,
+          do: @tag(skip: "pending (second factor): " <> @second_factor_pending)
+
         test "an enrolled second factor is owed until completed" do
           {user, creds} = @fixtures.user!(%{second_factor: :enrolled})
           {:ok, user} = Auth.authenticate(creds)

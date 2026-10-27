@@ -66,13 +66,36 @@ defmodule Macaw.Auth.PlugTest do
     end
   end
 
-  test "require_role checks membership only, 403 otherwise" do
+  test "require_role checks membership only, else home with an error flash" do
     {admin, _} = Mem.user!(%{roles: ["admin"]})
     {viewer, _} = Mem.user!(%{roles: ["viewer"]})
 
     refute (signed_in(admin, "/admin") |> AuthPlug.require_role(["admin", "owner"])).halted
+
+    conn =
+      signed_in(viewer, "/admin")
+      |> Phoenix.Controller.fetch_flash([])
+      |> AuthPlug.require_role(["admin"])
+
+    assert conn.halted and conn.status == 302
+    assert location(conn) == "/home"
+    assert Phoenix.Flash.get(conn.assigns.flash, :error) == "You are not allowed to do that."
+  end
+
+  test "require_role without fetch_flash still goes home, without a message" do
+    {viewer, _} = Mem.user!(%{roles: ["viewer"]})
     conn = signed_in(viewer, "/admin") |> AuthPlug.require_role(["admin"])
-    assert conn.halted and conn.status == 403
+    assert conn.halted and location(conn) == "/home"
+    refute Map.has_key?(conn.assigns, :flash)
+
+    signed_out = request("/admin") |> AuthPlug.require_role(["admin"])
+    assert signed_out.halted and location(signed_out) == "/home"
+  end
+
+  test "authenticate passes the client's address to the backend" do
+    {_user, creds} = Mem.user!(%{})
+    conn = %{request("/login") | remote_ip: {203, 0, 113, 7}}
+    assert {:ok, _} = AuthPlug.authenticate(conn, creds)
   end
 
   test "log_in renews the session, stores the token, and returns where the visitor was going" do
@@ -115,12 +138,30 @@ defmodule Macaw.Auth.PlugTest do
     assert id == session.id
   end
 
-  test "a remembered path that would leave the site goes home instead" do
+  # Phoenix's redirect raises on each of these; the guard in front of it
+  # sends them home, so a crafted path neither leaves the site nor fails
+  # the request.
+  test "a remembered path that would leave the site goes home instead, without raising" do
     {user, _} = Mem.user!(%{})
 
-    for evil <- ["//evil.example/x", "/\\evil.example", "https://evil.example"] do
+    for evil <- [
+          "//evil.example/x",
+          "/\\evil.example",
+          "https://evil.example",
+          "/a\\b",
+          "/%09/evil.example",
+          "/x\r\nSet-Cookie: a=b"
+        ] do
       conn = request("/login", %{"macaw_auth_return_to" => evil}) |> AuthPlug.log_in(user)
-      assert location(conn) == "/home", "#{evil} was followed"
+      assert conn.status == 302
+      assert location(conn) == "/home", "#{inspect(evil)} was followed"
+    end
+  end
+
+  test "site_path? agrees with Phoenix's own check" do
+    for path <- ["/", "/a", "/a?b=c", "//x", "/\\x", "/a\\b", "/%09x", "/\tx", "/a\nb", "x", ""] do
+      assert AuthPlug.site_path?(path) == (Phoenix.URL.classify_local_path(path) == :ok),
+             inspect(path)
     end
   end
 

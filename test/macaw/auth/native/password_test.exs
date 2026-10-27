@@ -86,7 +86,8 @@ defmodule Macaw.Auth.Native.Source.PasswordTest do
 
     # At a real cost (bcrypt 2^9 rounds, tens of milliseconds a hash), so
     # the hash dominates; the median and a 3x margin keep a busy CI runner
-    # from failing it.
+    # from failing it. The throttle is emptied before each attempt, so all
+    # nine are checked rather than the last four refused unchecked.
     test "measured: the medians are within a factor of three" do
       previous = Application.get_env(:bcrypt_elixir, :log_rounds)
       Application.put_env(:bcrypt_elixir, :log_rounds, 9)
@@ -96,6 +97,7 @@ defmodule Macaw.Auth.Native.Source.PasswordTest do
       median = fn username ->
         times =
           for _ <- 1..9 do
+            Macaw.Auth.Native.Throttle.reset()
             {us, {:error, :invalid_credentials}} = :timer.tc(fn -> sign_in(username, "wrong") end)
             us
           end

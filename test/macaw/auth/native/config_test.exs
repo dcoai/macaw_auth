@@ -195,4 +195,14 @@ defmodule Macaw.Auth.Native.ConfigTest do
                  "config :macaw_auth, Macaw.Auth.Native: sources: a source of type ldap needs a name",
                  fn -> Config.load!() end
   end
+
+  test "session_idle_days: default 14, an integer in 1..3650" do
+    assert {:ok, %Config{session_idle_days: 14}} = parse([])
+    assert {:ok, %Config{session_idle_days: 1}} = parse(session_idle_days: 1)
+
+    for bad <- [0, 3651, "14", 1.5, nil] do
+      assert {:error, "session_idle_days: must be an integer in 1..3650" <> _} =
+               parse(session_idle_days: bad)
+    end
+  end
 end

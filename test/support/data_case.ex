@@ -2,7 +2,8 @@ defmodule Macaw.Auth.DataCase do
   @moduledoc """
   Tests against the test repo, each in a sandboxed transaction, with the
   native backend configured from `sources` (default: a password source).
-  Not async: the configuration is node-wide (`:persistent_term`).
+  Not async: the configuration is node-wide (`:persistent_term`), and so
+  is the throttle's table, emptied before each test.
   """
 
   use ExUnit.CaseTemplate
@@ -21,6 +22,7 @@ defmodule Macaw.Auth.DataCase do
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
     previous = :persistent_term.get(Config, nil)
     configure!()
+    Macaw.Auth.Native.Throttle.reset()
 
     on_exit(fn ->
       if previous,

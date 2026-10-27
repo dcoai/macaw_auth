@@ -134,7 +134,7 @@ defmodule Macaw.Auth do
         :ok
 
       pubsub ->
-        apply(Phoenix.PubSub, :subscribe, [pubsub, topic(user_id)])
+        Phoenix.PubSub.subscribe(pubsub, topic(user_id))
     end
   end
 
@@ -146,7 +146,7 @@ defmodule Macaw.Auth do
         end)
 
       pubsub ->
-        apply(Phoenix.PubSub, :broadcast, [pubsub, topic(user_id), message])
+        Phoenix.PubSub.broadcast(pubsub, topic(user_id), message)
     end
   end
 

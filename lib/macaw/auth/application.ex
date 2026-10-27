@@ -9,10 +9,15 @@ defmodule Macaw.Auth.Application do
     if Application.get_env(:macaw_auth, :backend) == Macaw.Auth.Native,
       do: Macaw.Auth.Native.Config.load!()
 
-    # The local revocation channel, used when no `:pubsub` is configured.
-    Supervisor.start_link([{Registry, keys: :duplicate, name: Macaw.Auth.Registry}],
-      strategy: :one_for_one,
-      name: Macaw.Auth.Supervisor
-    )
+    children = [
+      # The local revocation channel, used when no `:pubsub` is configured.
+      {Registry, keys: :duplicate, name: Macaw.Auth.Registry},
+      # The native backend's sign-in failure counts: one small ETS table,
+      # started whichever backend is configured, so it is there the moment
+      # one is.
+      Macaw.Auth.Native.Throttle
+    ]
+
+    Supervisor.start_link(children, strategy: :one_for_one, name: Macaw.Auth.Supervisor)
   end
 end
