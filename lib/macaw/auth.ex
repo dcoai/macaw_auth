@@ -130,7 +130,7 @@ defmodule Macaw.Auth do
   def revoke(target, opts \\ []) do
     case backend().revoke_sessions(target, opts) do
       {_user_id, []} -> :ok
-      {user_id, ids} -> broadcast(user_id, {:sessions_revoked, ids})
+      {user_id, ids} -> announce_revoked(user_id, ids)
     end
   end
 
@@ -146,6 +146,20 @@ defmodule Macaw.Auth do
         Phoenix.PubSub.subscribe(pubsub, topic(user_id))
     end
   end
+
+  @doc """
+  Tells `user_id`'s open pages that sessions `ids` ended, so they disconnect.
+
+  `revoke/2` calls this after its backend revokes. A backend whose sessions
+  can also be revoked outside macaw_auth (an Ash token revoked through Ash,
+  say) calls it from that path too, so open pages hear of every revocation,
+  whoever made it. Announcing nothing is a no-op.
+  """
+  @spec announce_revoked(term(), [term()]) :: :ok
+  def announce_revoked(_user_id, []), do: :ok
+
+  def announce_revoked(user_id, ids) when is_list(ids),
+    do: broadcast(user_id, {:sessions_revoked, ids})
 
   defp broadcast(user_id, message) do
     case Application.get_env(:macaw_auth, :pubsub) do
