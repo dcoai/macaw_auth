@@ -25,6 +25,22 @@ defmodule Macaw.Auth.ClosedDefaultsTest do
 
   @tag verifies: "auth-closed"
   test "each setting that grants trust or loosens a policy grants nothing until it is set" do
+    # A misconfigured backend refuses boot: the application's start raises the
+    # backend's fault before it starts anything.
+    previous = Application.get_env(:macaw_auth, :backend)
+
+    on_exit(fn ->
+      if previous,
+        do: Application.put_env(:macaw_auth, :backend, previous),
+        else: Application.delete_env(:macaw_auth, :backend)
+    end)
+
+    Application.put_env(:macaw_auth, :backend, Macaw.Auth.Test.FaultyBackend)
+
+    assert_raise ArgumentError, ~r/FaultyBackend: idle/, fn ->
+      Macaw.Auth.Application.start(:normal, [])
+    end
+
     # LDAP: no plaintext, a verified certificate, no anonymous search.
     assert {:error, plaintext} = Ldap.parse(@nas, [])
     assert plaintext =~ "allow_plaintext: true"
@@ -86,15 +102,9 @@ defmodule Macaw.Auth.ClosedDefaultsTest do
     refute Auth.authorize(%User{id: 1, username: "root", roles: ["admin"]}, :manage, nil)
 
     # The remember cookie is set only when a sign-in asks for it, and is
-    # secure under https whatever log_in is given.
-    previous = Application.get_env(:macaw_auth, :backend)
+    # secure under https whatever log_in is given. (The backend set here is
+    # put back by the on_exit above.)
     Application.put_env(:macaw_auth, :backend, Native)
-
-    on_exit(fn ->
-      if previous,
-        do: Application.put_env(:macaw_auth, :backend, previous),
-        else: Application.delete_env(:macaw_auth, :backend)
-    end)
 
     {:ok, owner} = Auth.authenticate(%{username: "owner", password: "a local password"})
     cookie = Macaw.Auth.Plug.remember_cookie()

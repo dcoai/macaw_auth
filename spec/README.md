@@ -5,11 +5,11 @@
 | File | Covers | Status |
 |---|---|---|
 | [00 — Overview](00-overview.md) | what `macaw_auth` holds, the contract-plus-backends shape, dependencies, the boundary with Macaw composition, known gaps | |
-| [01 — The contract](01-contract.md) | `Macaw.Auth`, `Macaw.Auth.Backend` and every callback, `Macaw.Auth.User`, `Macaw.Auth.Session`, steps and `pending_step/2`, paths, revocation (`revoke/2`, `subscribe/1`, `announce_revoked/2`), `viewer/1`, `Macaw.Auth.Authorizer` and `authorize/3` | implemented (v0.3.0) |
+| [01 — The contract](01-contract.md) | `Macaw.Auth`, `Macaw.Auth.Backend` and every callback, `Macaw.Auth.User`, `Macaw.Auth.Session`, steps and `pending_step/2`, paths, revocation (`revoke/2`, `subscribe/1`, `announce_revoked/2`), `viewer/1`, `Macaw.Auth.Authorizer` and `authorize/3`, `check_config!/0` at boot | implemented (v0.4.0) |
 | [02 — Plugs](02-plugs.md) | `Macaw.Auth.Plug`: the session keys, every plug and function, the return path and the site-path guard, the role refusal's flash, `authorize/2`, the client address | implemented (v0.3.1) |
 | [03 — LiveView hooks](03-live.md) | `Macaw.Auth.Live`: each `on_mount` (`{:authorize, action}` among them), the guard, the revocation push and the re-check | implemented (v0.3.0) |
-| [04 — The conformance kit](04-conformance.md) | `Macaw.Auth.Conformance`, its `Fixtures` behavior, every check, `pending:` | implemented (v0.2.0) |
-| [05 — Native: configuration and sign-in](05-native-config.md) | `Macaw.Auth.Native` (sign-in, one refusal, telemetry, users), `Macaw.Auth.Native.Config` (every key, defaults, validation, hidden secrets) | implemented (v0.1.0) |
+| [04 — The conformance kit](04-conformance.md) | `Macaw.Auth.Conformance`, its `Fixtures` behavior, every check, `pending:` | implemented (v0.4.0) |
+| [05 — Native: configuration and sign-in](05-native-config.md) | `Macaw.Auth.Native` (sign-in, one refusal, telemetry, users), `Macaw.Auth.Native.Config` (every key, defaults, validation, hidden secrets, checked at boot) | implemented (v0.4.0) |
 | [06 — Native: sources and the chain](06-native-sources.md) | `Macaw.Auth.Native.Source` (the behavior and the chain), `Source.Password`, `Macaw.Auth.Native.Provision`, the users row and its usernames | implemented (v0.1.0) |
 | [07 — Native: LDAP](07-native-ldap.md) | `Source.Ldap` and `Source.Ldap.Config` (TLS rules, `allow_plaintext`, direct or search bind, groups, roles), `Source.Ldap.Escape` (RFC 4514/4515), `Source.Ldap.Filter`, `diagnose/3` and `mix macaw_auth.ldap.check` | implemented (v0.1.0) |
 | [08 — Native: hashers](08-native-hashers.md) | `Macaw.Auth.Native.Hasher`, bcrypt and argon2, rehash at sign-in, across algorithms | implemented (v0.2.0) |

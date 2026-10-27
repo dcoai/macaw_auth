@@ -4,10 +4,14 @@ defmodule Macaw.Auth.Application do
 
   @impl true
   def start(_type, _args) do
-    # The native backend's configuration is read at boot, so a fault in it
-    # refuses to start, naming the key, rather than failing a sign-in.
-    if Application.get_env(:macaw_auth, :backend) == Macaw.Auth.Native,
-      do: Macaw.Auth.Native.Config.load!()
+    # The configured backend's configuration is checked at boot, so a fault
+    # in it refuses to start, named, rather than failing a sign-in. With no
+    # backend configured, none is asked (Macaw.Auth.backend/0 then raises at
+    # each call).
+    case Application.get_env(:macaw_auth, :backend) do
+      nil -> :ok
+      backend -> :ok = backend.check_config!()
+    end
 
     children = [
       # The local revocation channel, used when no `:pubsub` is configured.

@@ -3,11 +3,13 @@ defmodule Macaw.Auth.Backend do
   What a backend implements: who someone is, and their sessions. Nothing
   else. The plugs, hooks, steps, paths and the revocation push are
   `Macaw.Auth`'s, the same for every backend, so a backend never
-  reimplements them.
+  reimplements them. And one check: `check_config!/0`, which the
+  application calls at start, so a misconfigured backend refuses boot.
 
-  Every function takes `opts`; `:now` (a `DateTime`) overrides the clock,
-  so expiry is testable. A backend never raises for an ordinary refusal: it
-  returns an error value. It must:
+  Every function but `check_config!/0` takes `opts`; `:now` (a
+  `DateTime`) overrides the clock, so expiry is testable. A backend never
+  raises for an ordinary refusal: it returns an error value. Only
+  `check_config!/0` raises, for a fault in its configuration. It must:
 
   - store no more than a hash of a session token;
   - spend the same time refusing an unknown user as a wrong password, and
@@ -86,4 +88,13 @@ defmodule Macaw.Auth.Backend do
   """
   @callback verify_second_factor(term(), term(), opts()) ::
               :ok | {:error, :invalid_code | :throttled | :invalid | :expired | :disabled}
+
+  @doc """
+  Checks the backend's whole configuration, as its first sign-in would
+  read it: `:ok`, or a raise naming the fault (the setting, and what is
+  wrong with it). `Macaw.Auth.Application` calls it at start for the
+  configured backend, and matches its `:ok`, so a fault refuses boot
+  rather than failing a sign-in.
+  """
+  @callback check_config!() :: :ok
 end

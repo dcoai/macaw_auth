@@ -28,7 +28,7 @@ A fixture that confirms enrollment with the current step's code has spent it: it
 
 ## 2. The checks {#auth-kit-checks}
 
-Twenty-one tests, in four groups.
+Twenty-two tests, in five groups.
 
 **`conformance: authenticate`:**
 1. valid credentials sign in, as the fixture's user;
@@ -62,16 +62,20 @@ Twenty-one tests, in four groups.
 20. **a code is accepted once:** accepted on one session, the same code is refused on another of the user's, which still owes the step;
 21. a user policy requires to have one (`:required`) owes `:second_factor_enroll`, and completing it clears it.
 
+**`conformance: configuration`:**
+
+22. **the backend checks its configuration:** it exports `check_config!/0`, and with the configuration the kit's tests run under, it is `:ok` ([01 §2.9](01-contract.md#auth-backend-check-config)) (v0.4.0).
+
 Test 5 needs the fixtures: the contract has no way to delete a user, so `delete!/1` does it the backend's own way, as `disable!/1` disables one. A revocation racing a backend between its own read and write can't be driven portably, so the kit checks a session revoked before the step (test 16), and the native backend's own suite checks the race ([09 §6](09-native-sessions.md#auth-sessions-steps)).
 
 The kit does not check timing parity, escaping or throttling; a backend's own suite does (the native backend's: [06 §3](06-native-sources.md#auth-source-password), [07 §5](07-native-ldap.md#auth-ldap-escape), [10](10-native-throttle.md)).
 
 ```test:kit-native
-the kit run against Macaw.Auth.Native passes all twenty-one tests, none skipped
+the kit run against Macaw.Auth.Native passes all twenty-two tests, none skipped
 ```
 
 ```test:kit-memory
-the kit run against the in-memory test backend passes all twenty-one tests, none skipped
+the kit run against the in-memory test backend passes all twenty-two tests, none skipped
 ```
 
 ## 3. Pending capabilities {#auth-kit-pending}
@@ -79,5 +83,5 @@ the kit run against the in-memory test backend passes all twenty-one tests, none
 A backend still being built may name a capability it doesn't have yet: `pending: [second_factor: "why"]`. The tests that need it are then **skipped, visibly,** tagged `skip: "pending (second factor): <why>"`, so every run's summary says so, rather than removed or passed by a fixture that pretends. The only capability is `:second_factor`, which skips the whole `conformance: second factor` group (tests 17–21). The native backend ran the kit with it pending until its second factor existed, and was then required to remove it (macaw_compose#51, #52); the Ash backend runs with it pending until AshAuthentication 5.0 is final.
 
 ```test:kit-pending
-a backend run with pending: [second_factor: "reason"] reports the five second-factor tests skipped, each with "pending (second factor): reason", and the other sixteen run
+a backend run with pending: [second_factor: "reason"] reports the five second-factor tests skipped, each with "pending (second factor): reason", and the other seventeen run
 ```

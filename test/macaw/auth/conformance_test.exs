@@ -17,13 +17,13 @@ defmodule Macaw.Auth.MemoryBackendConformanceTest do
   end
 
   @tag verifies: "kit-memory"
-  test "the kit's twenty-one tests run against the in-memory backend, none skipped" do
-    assert length(kit_tests()) == 21
+  test "the kit's twenty-two tests run against the in-memory backend, none skipped" do
+    assert length(kit_tests()) == 22
     assert Enum.all?(kit_tests(), &(&1.tags[:skip] == nil))
   end
 
   @tag verifies: "auth-kit-checks"
-  test "the checks are twenty-one, in four groups, as the spec lists them" do
+  test "the checks are twenty-two, in five groups, as the spec lists them" do
     groups =
       kit_tests()
       |> Enum.group_by(
@@ -65,7 +65,8 @@ defmodule Macaw.Auth.MemoryBackendConformanceTest do
                  "a wrong code is refused, and the step is still owed",
                  "a code is accepted once",
                  "a user whom policy requires to have one owes enrollment"
-               ])
+               ]),
+             "conformance: configuration" => ["the backend checks its configuration"]
            }
   end
 

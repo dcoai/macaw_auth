@@ -194,6 +194,10 @@ defmodule Macaw.Auth.Test.MemoryBackend do
   @impl Macaw.Auth.Backend
   def session_idle_seconds(_opts), do: @idle
 
+  # Nothing to check: its users, sessions and idle limit are its own.
+  @impl Macaw.Auth.Backend
+  def check_config!, do: :ok
+
   @impl Macaw.Auth.Backend
   def list_sessions(user_id, _opts) do
     for({_, s} <- :ets.tab2list(@sessions), s.user_id == user_id, do: s)

@@ -36,7 +36,10 @@ defmodule Macaw.Auth.Conformance do
     a user enrolled through the fixture is reported `:enrolled`; a valid
     code passes the step (`Macaw.Auth.verify_second_factor/3`), a wrong
     one doesn't, and **a code is accepted once**; a user whom policy
-    requires to have one owes enrollment.
+    requires to have one owes enrollment;
+  - the backend exports `check_config!/0`, the check the application
+    makes at start, and it is `:ok` for the configuration the kit's tests
+    run under.
   """
 
   defmodule Fixtures do
@@ -315,6 +318,14 @@ defmodule Macaw.Auth.Conformance do
           :ok = Auth.complete_step(session.id, :second_factor_enroll)
           {:ok, user, session} = Auth.fetch(token)
           assert Auth.pending_step(user, session) == nil
+        end
+      end
+
+      describe "conformance: configuration" do
+        test "the backend checks its configuration" do
+          Code.ensure_loaded!(@backend)
+          assert function_exported?(@backend, :check_config!, 0)
+          assert @backend.check_config!() == :ok
         end
       end
 

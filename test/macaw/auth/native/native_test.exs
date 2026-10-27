@@ -53,6 +53,10 @@ defmodule Macaw.Auth.NativeTest do
       assert {:ok, %User{id: id}, %{id: sid}} = Sessions.fetch(token, [])
       assert {id, sid} == {user.id, session.id}
       assert [%{id: ^sid}] = Native.list_sessions(user.id, [])
+
+      # check_config!/0 is Config.load!/0: :ok, and the configuration kept.
+      assert Native.check_config!() == :ok
+      assert Config.get() == Config.load!()
     end
 
     @tag verifies: "auth-native-authenticate"

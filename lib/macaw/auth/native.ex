@@ -168,6 +168,19 @@ defmodule Macaw.Auth.Native do
   @impl Macaw.Auth.Backend
   defdelegate complete_step(session_id, step, opts), to: Sessions
 
+  @doc """
+  Reads and checks the configuration, and keeps it
+  (`Macaw.Auth.Native.Config.load!/0`): `:ok`, or
+  `Macaw.Auth.Native.Config.Error` naming the fault. The application
+  calls it at start, so a bad configuration refuses boot.
+  """
+  @impl Macaw.Auth.Backend
+  @spec check_config!() :: :ok
+  def check_config! do
+    %Config{} = Config.load!()
+    :ok
+  end
+
   # ── The second factor ─────────────────────────────────────────────────
 
   @doc """

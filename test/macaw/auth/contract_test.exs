@@ -44,6 +44,9 @@ defmodule Macaw.Auth.ContractTest.Recorder do
   def verify_second_factor(id, code, opts),
     do: reply({:verify_second_factor, id, code, opts}, {:error, :invalid_code})
 
+  @impl true
+  def check_config!, do: reply(:check_config!, :ok)
+
   defp reply(call, answer) do
     send(self(), {:backend, call})
     answer
@@ -183,7 +186,7 @@ defmodule Macaw.Auth.ContractTest do
 
   describe "every backend" do
     @tag verifies: "auth-backend"
-    test "nine callbacks; :now moves the clock; refusals are values; only a hash of a token is stored" do
+    test "ten callbacks; :now moves the clock; refusals are values; only a hash of a token is stored" do
       assert Enum.sort(Backend.behaviour_info(:callbacks)) ==
                Enum.sort(
                  authenticate: 2,
@@ -194,7 +197,8 @@ defmodule Macaw.Auth.ContractTest do
                  list_sessions: 2,
                  revoke_sessions: 2,
                  complete_step: 3,
-                 verify_second_factor: 3
+                 verify_second_factor: 3,
+                 check_config!: 0
                )
 
       for {backend, fixtures} <- @backends do

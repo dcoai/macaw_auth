@@ -6,7 +6,7 @@ What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Maca
 
 ## 1. The facade {#auth-contract-facade}
 
-`Macaw.Auth` owns what is the same for every backend, so a backend never reimplements it: the steps a session owes (§4), the paths (§3), the revocation push (§6), the viewer (§8) and asking the app's authorizer (§9). Its session and sign-in functions pass through to the configured backend:
+`Macaw.Auth` owns what is the same for every backend, so a backend never reimplements it: the steps a session owes (§4), the paths (§3), the revocation push (§6), the viewer (§8) and asking the app's authorizer (§9). Its session and sign-in functions pass through to the configured backend, and its application asks that backend, at boot, to check its configuration:
 
 | Function | Calls | Returns |
 |---|---|---|
@@ -19,6 +19,7 @@ What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Maca
 | `Macaw.Auth.complete_step/3` | `complete_step/3` | `:ok` or `{:error, :invalid}` |
 | `Macaw.Auth.verify_second_factor/3` | `verify_second_factor/3` | `:ok` or `{:error, reason}` |
 | `Macaw.Auth.revoke/2` | `revoke_sessions/2`, then the push (§6) | `:ok` |
+| the application's start (`Macaw.Auth.Application`) | `check_config!/0` (§2.9) | starts; a fault in the configuration refuses boot |
 
 - **`fetch/2` of anything but a binary** (`nil`, a session without a token) is `{:error, :invalid}`, without asking the backend.
 - **`complete_step/3` takes only a step** of `steps/0`; any other atom is a `FunctionClauseError`, never passed on.
@@ -42,7 +43,7 @@ with :backend deleted from the application environment, Macaw.Auth.backend/0 rai
 
 ## 2. The backend behavior {#auth-backend}
 
-`Macaw.Auth.Backend` is what a backend implements: who someone is, and their sessions. Nothing else. Every callback takes `opts`, a keyword list in which **`:now` (a `DateTime`) overrides the clock**, so expiry is testable. A backend **never raises for an ordinary refusal:** it returns an error value. And it must:
+`Macaw.Auth.Backend` is what a backend implements: who someone is, and their sessions. Nothing else. Every callback but `check_config!/0` (§2.9) takes `opts`, a keyword list in which **`:now` (a `DateTime`) overrides the clock**, so expiry is testable. A backend **never raises for an ordinary refusal:** it returns an error value; only `check_config!/0` raises, and only for a fault in the backend's configuration, which is a deployment's bug, never a visitor's refusal. And it must:
 - **store no more than a hash of a session token;**
 - **spend the same time refusing an unknown user as a wrong password,** and give both the same refusal;
 - **refuse a disabled user's sessions, and expire idle ones.**
@@ -110,6 +111,16 @@ for each backend: complete_step of a revoked session's id with :password_change 
 
 ```test:backend-idle-seconds
 Macaw.Auth.session_idle_seconds/0 with the native backend is 14 × 86 400 by default and 86 400 with session_idle_days 1; with the memory backend, 3 600; for each backend, it equals the fixtures' idle_seconds/0
+```
+
+### 2.9 check_config!/0 {#auth-backend-check-config}
+
+`check_config!()` checks the backend's whole configuration, as its first sign-in would read it, and returns **`:ok`**; **any fault raises an error naming it** (the setting, and what is wrong with it). It is required: a backend without it doesn't implement the behavior. Added in v0.4.0: a backend written for v0.3 must add it.
+
+**`Macaw.Auth.Application` calls it at start, for whichever backend `:backend` names** (§1.1), before it starts anything, so a misconfigured backend **refuses boot**, naming the fault, rather than starting and failing at its first sign-in. Its `:ok` is matched: any other answer refuses boot too. **With `:backend` unset, the application starts without asking any backend**, as before v0.4.0; every call through `Macaw.Auth.backend/0` then raises (§1.1). The native backend's is `Macaw.Auth.Native.Config.load!/0` ([05 §2.1](05-native-config.md#auth-native-config-load)); the in-memory test backend has no configuration, and its is `:ok`. The kit checks a backend exports it and that it is `:ok` for the kit's working configuration ([04 §2](04-conformance.md#auth-kit-checks)).
+
+```test:backend-check-config-boot
+with :backend naming a backend whose check_config!/0 raises, :macaw_auth refuses to start, the error the backend's, naming the fault; with one whose check_config!/0 answers other than :ok, it refuses too; with the memory backend, it starts; with :backend unset, it starts without asking any backend
 ```
 
 ## 3. Paths {#auth-paths}

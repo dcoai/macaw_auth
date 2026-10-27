@@ -16,6 +16,7 @@ config :macaw_auth, Macaw.Auth.Native,
 | `authenticate/2` | `Macaw.Auth.Native.authenticate/2` (§1), the source chain ([06](06-native-sources.md)), the throttle ([10](10-native-throttle.md)) |
 | `create_session/2`, `fetch_session/2`, `fetch_session_by_id/2`, `list_sessions/2`, `revoke_sessions/2`, `complete_step/3` | `Macaw.Auth.Native.Sessions` ([09](09-native-sessions.md)) |
 | `verify_second_factor/3` | `Macaw.Auth.Native.verify_second_factor/3` ([11 §5](11-native-totp.md#auth-totp-verify)) |
+| `check_config!/0` | `Macaw.Auth.Native.check_config!/0`: `Macaw.Auth.Native.Config.load!/0` (§2.1) |
 
 ## 1. Signing in {#auth-native-authenticate}
 
@@ -99,8 +100,12 @@ the inspection of a parsed configuration contains neither "sealing_key" nor the 
 ### 2.1 Reading it once {#auth-native-config-load}
 
 - `Macaw.Auth.Native.Config.parse/2` parses a keyword list or map: `{:ok, config}` or `{:error, message}`. Its option `:env` (a map) is the environment `{:env, VAR}` secrets resolve from, by default the process's.
-- `Macaw.Auth.Native.Config.load!/0` parses the application's configuration and keeps it; a fault raises `Macaw.Auth.Native.Config.Error` with `"config :macaw_auth, Macaw.Auth.Native: "` and the fault. **It runs when the application starts with `backend: Macaw.Auth.Native`,** so a bad configuration refuses boot rather than a sign-in.
+- `Macaw.Auth.Native.Config.load!/0` parses the application's configuration and keeps it; a fault raises `Macaw.Auth.Native.Config.Error` with `"config :macaw_auth, Macaw.Auth.Native: "` and the fault. **It runs when the application starts with `backend: Macaw.Auth.Native`:** the backend's `check_config!/0` calls it and returns `:ok`, and the application calls that ([01 §2.9](01-contract.md#auth-backend-check-config)), so a bad configuration refuses boot rather than a sign-in.
 - The parsed configuration is kept in `:persistent_term`: `Macaw.Auth.Native.Config.get/0` reads it, loading it at first use when boot didn't, and `Macaw.Auth.Native.Config.put/1` replaces it (tests swap it).
+
+```test:native-check-config
+with the native backend configured and session_idle_days 0, :macaw_auth refuses to start, the Config.Error naming session_idle_days; with a working configuration, Macaw.Auth.Native.check_config!/0 is :ok, keeps that configuration, and the application starts
+```
 
 ```test:native-config-load
 with sources: [%{type: :ldap}] configured, load!/0 raises Config.Error "config :macaw_auth, Macaw.Auth.Native: sources: a source of type ldap needs a name"
