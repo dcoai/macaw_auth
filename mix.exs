@@ -20,7 +20,10 @@ defmodule Macaw.Auth.MixProject do
   end
 
   def application do
-    [mod: {Macaw.Auth.Application, []}, extra_applications: [:logger, :crypto]]
+    [
+      mod: {Macaw.Auth.Application, []},
+      extra_applications: [:logger, :crypto, :eldap, :ssl, :public_key]
+    ]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
@@ -31,8 +34,12 @@ defmodule Macaw.Auth.MixProject do
       {:macaw_plug, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_plug.git", tag: "v0.1.0"},
       {:plug, "~> 1.16"},
       {:telemetry, "~> 1.2"},
+      {:ecto_sql, "~> 3.12"},
+      {:bcrypt_elixir, "~> 3.2", optional: true},
+      {:argon2_elixir, "~> 4.1", optional: true},
       {:phoenix_live_view, "~> 1.0", optional: true},
       {:phoenix_pubsub, "~> 2.1", optional: true},
+      {:ecto_sqlite3, "~> 0.17", only: :test},
       {:stream_data, "~> 1.1", only: :test}
     ]
   end

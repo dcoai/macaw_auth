@@ -22,8 +22,10 @@ stages:
   before_script:
     # Git dependencies (macaw_plug) come over HTTPS with this job's token:
     # the image has no git, and the SSH URLs in mix.exs need a key CI lacks.
-    # macaw_plug allowlists this project's job token.
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates > /dev/null
+    # macaw_plug allowlists this project's job token. build-essential: the
+    # bcrypt and argon2 NIFs compile from source, and the slim image has no
+    # C compiler.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates build-essential > /dev/null
     - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.conet.yarina.org/".insteadOf "git@gitlab.conet.yarina.org:"
     - mix local.hex --force
     - mix local.rebar --force
@@ -57,5 +59,14 @@ spelling:
 test:
   extends: .elixir
   stage: test
+  # The OpenLDAP fixture directory for the :ldap tests, macaw's image (its
+  # registry allowlists this project's job token): LDAP with StartTLS on
+  # 389, LDAPS on 636, with the CA in test/fixtures/ldap.
+  services:
+    - name: gitlab.conet.yarina.org:5005/dco-tek/macaw/ci-ldap:014dfe666f5b803e
+      alias: ldap
+  variables:
+    MIX_ENV: test
+    MACAW_AUTH_LDAP_HOST: ldap
   script:
     - mix test
