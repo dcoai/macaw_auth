@@ -40,30 +40,58 @@ defmodule Macaw.Auth.Native.Sessions do
 
   @doc """
   Starts a session for `user`: `{:ok, token, session}`, the token for the
-  client only. Options: `:remote_ip` (a string or an address tuple),
-  `:user_agent`, `:second_factor_passed` (default true), `:now`.
+  client only, or `{:error, :invalid}` when the user no longer exists
+  (deleted since signing in). Options: `:remote_ip` (a string or an
+  address tuple), `:user_agent`, `:second_factor_passed` (default true),
+  `:now`.
   """
-  @spec create(User.t(), keyword()) :: {:ok, binary(), Session.t()}
+  @spec create(User.t(), keyword()) :: {:ok, binary(), Session.t()} | {:error, :invalid}
   def create(%User{} = user, opts) do
     %Config{repo: repo} = Config.get()
     now = now(opts)
     token = :crypto.strong_rand_bytes(32)
 
-    record =
-      repo.insert!(%SessionRecord{
-        user_id: user.id,
-        token_hash: hash(token),
-        remote_ip: ip(Keyword.get(opts, :remote_ip)),
-        user_agent: truncate(Keyword.get(opts, :user_agent)),
-        second_factor_passed: Keyword.get(opts, :second_factor_passed, true),
-        completed_steps: [],
-        last_used_at: now,
-        inserted_at: now,
-        updated_at: now
-      })
+    with {:ok, user_id} <- Ecto.UUID.cast(user.id),
+         record = %SessionRecord{
+           id: Ecto.UUID.generate(),
+           user_id: user_id,
+           token_hash: hash(token),
+           remote_ip: ip(Keyword.get(opts, :remote_ip)),
+           user_agent: truncate(Keyword.get(opts, :user_agent)),
+           second_factor_passed: Keyword.get(opts, :second_factor_passed, true),
+           completed_steps: [],
+           last_used_at: now,
+           inserted_at: now,
+           updated_at: now
+         },
+         {1, _} <- repo.insert_all(SessionRecord, from_user(record)) do
+      event(:created, nil, user_id)
+      {:ok, token, to_session(record)}
+    else
+      _no_user -> {:error, :invalid}
+    end
+  end
 
-    event(:created, nil, user.id)
-    {:ok, token, to_session(record)}
+  # The row, selected from its user's: one statement inserts it only while
+  # the user exists, so a user deleted since signing in gets no session
+  # (nor a foreign-key error), and no gap is left between a check and the
+  # insert.
+  defp from_user(%SessionRecord{} = r) do
+    from(u in UserRecord,
+      where: u.id == ^r.user_id,
+      select: %{
+        id: type(^r.id, :binary_id),
+        user_id: u.id,
+        token_hash: type(^r.token_hash, :binary),
+        remote_ip: type(^r.remote_ip, :string),
+        user_agent: type(^r.user_agent, :string),
+        second_factor_passed: type(^r.second_factor_passed, :boolean),
+        completed_steps: type(^r.completed_steps, {:array, :string}),
+        last_used_at: type(^r.last_used_at, :utc_datetime_usec),
+        inserted_at: type(^r.inserted_at, :utc_datetime_usec),
+        updated_at: type(^r.updated_at, :utc_datetime_usec)
+      }
+    )
   end
 
   defp ip(nil), do: nil
@@ -119,16 +147,22 @@ defmodule Macaw.Auth.Native.Sessions do
             {:error, :expired}
 
           Keyword.get(opts, :touch, false) and idle >= @touch_every ->
-            {1, _} =
-              repo.update_all(where(SessionRecord, id: ^record.id),
-                set: [last_used_at: now, updated_at: now]
-              )
-
-            {:ok, Native.to_user(user), to_session(%{record | last_used_at: now})}
+            touch(repo, record, user, now)
 
           true ->
             {:ok, Native.to_user(user), to_session(record)}
         end
+    end
+  end
+
+  # A row deleted since the look-up (a revocation racing it) updates
+  # nothing: the session is revoked, so it is refused as one.
+  defp touch(repo, record, user, now) do
+    case repo.update_all(where(SessionRecord, id: ^record.id),
+           set: [last_used_at: now, updated_at: now]
+         ) do
+      {1, _} -> {:ok, Native.to_user(user), to_session(%{record | last_used_at: now})}
+      {0, _} -> {:error, :invalid}
     end
   end
 
@@ -211,20 +245,22 @@ defmodule Macaw.Auth.Native.Sessions do
   @doc """
   Records a completed step: `:second_factor` and `:second_factor_enroll`
   mark the second factor passed; any other step joins `completed_steps`.
-  A session gone meanwhile is left gone (`:ok`): the caller's next look-up
-  finds it so.
+  A session that doesn't exist, or was deleted meanwhile (a revocation
+  racing the step), is left gone and refused: `{:error, :invalid}`.
   """
-  @spec complete_step(term(), Auth.step(), keyword()) :: :ok
+  @spec complete_step(term(), Auth.step(), keyword()) :: :ok | {:error, :invalid}
   def complete_step(id, step, opts) when step in [:second_factor, :second_factor_enroll] do
     %Config{repo: repo} = Config.get()
 
-    with {:ok, id} <- Ecto.UUID.cast(id) do
-      repo.update_all(where(SessionRecord, id: ^id),
-        set: [second_factor_passed: true, updated_at: now(opts)]
-      )
+    with {:ok, id} <- Ecto.UUID.cast(id),
+         {1, _} <-
+           repo.update_all(where(SessionRecord, id: ^id),
+             set: [second_factor_passed: true, updated_at: now(opts)]
+           ) do
+      :ok
+    else
+      _gone -> {:error, :invalid}
     end
-
-    :ok
   end
 
   def complete_step(id, step, opts) do
@@ -232,14 +268,27 @@ defmodule Macaw.Auth.Native.Sessions do
     name = Atom.to_string(step)
 
     with {:ok, id} <- Ecto.UUID.cast(id),
-         %SessionRecord{completed_steps: done} = record <- repo.get(SessionRecord, id),
-         false <- name in done do
+         %SessionRecord{} = record <- repo.get(SessionRecord, id) do
+      add_step(repo, record, name, opts)
+    else
+      _gone -> {:error, :invalid}
+    end
+  end
+
+  # A row deleted between the read and this write is stale: with
+  # `stale_error_field` that is an error value, not a raise.
+  defp add_step(repo, %SessionRecord{completed_steps: done} = record, name, opts) do
+    if name in done do
+      :ok
+    else
       record
       |> Ecto.Changeset.change(completed_steps: done ++ [name], updated_at: now(opts))
-      |> repo.update!()
+      |> repo.update(stale_error_field: :id)
+      |> case do
+        {:ok, _record} -> :ok
+        {:error, _stale} -> {:error, :invalid}
+      end
     end
-
-    :ok
   end
 
   @doc "A row as the contract's `%Macaw.Auth.Session{}`."

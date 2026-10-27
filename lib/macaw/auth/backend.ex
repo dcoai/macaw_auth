@@ -10,10 +10,13 @@ defmodule Macaw.Auth.Backend do
   returns an error value. It must:
 
   - store no more than a hash of a session token;
-  - spend the same time refusing an unknown user as a wrong password;
+  - spend the same time refusing an unknown user as a wrong password, and
+    give both the same refusal;
   - refuse a disabled user's sessions, and expire idle ones.
 
-  The conformance kit (`Macaw.Auth.Conformance`) checks these.
+  The conformance kit (`Macaw.Auth.Conformance`) checks what it can of
+  these: no token stored as it is, the same refusal, disabled and idle
+  sessions refused. It does not check timing; a backend's own suite does.
   """
 
   alias Macaw.Auth.{Session, User}
@@ -30,10 +33,12 @@ defmodule Macaw.Auth.Backend do
 
   @doc """
   Starts a session for a user who passed `authenticate/2`; returns the
-  token for the client. Options: `:remote_ip`, `:user_agent`,
-  `:second_factor_passed`.
+  token for the client, or `{:error, :invalid}` when the user no longer
+  exists (deleted since signing in), never a session for them. Options:
+  `:remote_ip`, `:user_agent`, `:second_factor_passed`.
   """
-  @callback create_session(User.t(), opts()) :: {:ok, binary(), Session.t()}
+  @callback create_session(User.t(), opts()) ::
+              {:ok, binary(), Session.t()} | {:error, :invalid}
 
   @doc """
   Resolves a token. `touch: true` (a request) may record use, no more than
@@ -64,8 +69,12 @@ defmodule Macaw.Auth.Backend do
   """
   @callback revoke_sessions(term() | {:user, term()}, opts()) :: {term(), [term()]}
 
-  @doc "Records that a session has completed a step (`:second_factor`, `:password_change`)."
-  @callback complete_step(term(), Macaw.Auth.step(), opts()) :: :ok
+  @doc """
+  Records that a session has completed a step (`:second_factor`,
+  `:password_change`): `:ok`, or `{:error, :invalid}` when the session
+  doesn't exist (revoked meanwhile), never a raise.
+  """
+  @callback complete_step(term(), Macaw.Auth.step(), opts()) :: :ok | {:error, :invalid}
 
   @doc """
   Checks a second-factor code for the user of a session (a TOTP code or a

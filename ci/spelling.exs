@@ -42,9 +42,9 @@ defmodule Spelling do
     ~r{^test/ci/spelling_test\.exs$}
   ]
 
-  # Elixir's own spelling: the attribute, dependency modules, and the
-  # language feature by name.
-  @exempt_tokens ~r/@behaviour|\bBehaviour\b|(`[^`]+`|\bOTP|\bAccess|\bGenServer) behaviours?\b/
+  # Elixir's own spelling: the attribute, its generated function, dependency
+  # modules, and the language feature by name.
+  @exempt_tokens ~r/@behaviour|\bbehaviour_info\b|\bBehaviour\b|(`[^`]+`|\bOTP|\bAccess|\bGenServer) behaviours?\b/
 
   @doc """
   The pattern: a British word, or an -ise stem with a verb or noun ending,

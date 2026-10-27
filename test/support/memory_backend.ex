@@ -60,6 +60,19 @@ defmodule Macaw.Auth.Test.MemoryBackend do
   end
 
   @impl Macaw.Auth.Conformance.Fixtures
+  def delete!(%User{username: name}) do
+    :ets.delete(@users, name)
+    :ok
+  end
+
+  @doc "Changes a user's fields (`:roles`, `:must_change_password`), as an admin would."
+  def update_user!(%User{username: name}, changes) do
+    [{^name, user, hash}] = :ets.lookup(@users, name)
+    :ets.insert(@users, {name, struct!(user, changes), hash})
+    :ok
+  end
+
+  @impl Macaw.Auth.Conformance.Fixtures
   def enroll_second_factor!(%User{username: name, id: id}) do
     secret = NimbleTOTP.secret()
     # Confirmed with the previous step's code, so the current one is unspent.
@@ -110,8 +123,16 @@ defmodule Macaw.Auth.Test.MemoryBackend do
     end
   end
 
+  # A user deleted since signing in gets no session.
   @impl Macaw.Auth.Backend
   def create_session(%User{} = user, opts) do
+    case user_by_id(user.id) do
+      nil -> {:error, :invalid}
+      _user -> start_session(user, opts)
+    end
+  end
+
+  defp start_session(user, opts) do
     token = :crypto.strong_rand_bytes(32)
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
 
@@ -202,18 +223,20 @@ defmodule Macaw.Auth.Test.MemoryBackend do
 
   @impl Macaw.Auth.Backend
   def complete_step(id, step, _opts) do
-    {h, s} = Enum.find(:ets.tab2list(@sessions), fn {_, s} -> s.id == id end)
+    case Enum.find(:ets.tab2list(@sessions), fn {_, s} -> s.id == id end) do
+      {h, s} ->
+        :ets.insert(@sessions, {h, with_step(s, step)})
+        :ok
 
-    s =
-      case step do
-        :second_factor -> %{s | second_factor_passed: true}
-        :second_factor_enroll -> %{s | second_factor_passed: true}
-        other -> %{s | completed_steps: Enum.uniq([other | s.completed_steps])}
-      end
-
-    :ets.insert(@sessions, {h, s})
-    :ok
+      nil ->
+        {:error, :invalid}
+    end
   end
+
+  defp with_step(s, step) when step in [:second_factor, :second_factor_enroll],
+    do: %{s | second_factor_passed: true}
+
+  defp with_step(s, step), do: %{s | completed_steps: Enum.uniq([step | s.completed_steps])}
 
   @impl Macaw.Auth.Backend
   def verify_second_factor(session_id, code, opts) do

@@ -143,6 +143,50 @@ defmodule Macaw.Auth.PlugTest do
     assert conn.assigns.pending_step == nil
   end
 
+  test "complete_step of a session revoked meanwhile logs out" do
+    {user, _} = Mem.user!(%{must_change_password: true})
+    {:ok, token, session} = Auth.create_session(user)
+    conn = request("/password", %{AuthPlug.token_key() => token})
+    :ok = Auth.revoke(session.id)
+
+    conn = AuthPlug.complete_step(conn, :password_change)
+    assert conn.halted
+    assert location(conn) == "/login"
+    assert get_session(conn, AuthPlug.token_key()) == nil
+  end
+
+  describe "log_in for a user the backend no longer has" do
+    test "goes back to sign in with a flash, setting no session or cookie" do
+      {user, _} = Mem.user!(%{})
+      :ok = Mem.delete!(user)
+
+      conn =
+        request("/login", %{"macaw_auth_return_to" => "/reports"})
+        |> Phoenix.Controller.fetch_flash([])
+        |> AuthPlug.log_in(user, remember: true)
+
+      assert conn.halted
+      assert conn.status == 302
+      assert location(conn) == "/login"
+      assert Phoenix.Flash.get(conn.assigns.flash, :error) == "You could not be signed in."
+      assert get_session(conn, AuthPlug.token_key()) == nil
+      assert get_session(conn, :live_socket_id) == nil
+      refute Map.has_key?(conn.resp_cookies, @remember)
+      assert Auth.list_sessions(user.id) == []
+    end
+
+    test "without fetch_flash, the same, without a message" do
+      {user, _} = Mem.user!(%{})
+      :ok = Mem.delete!(user)
+
+      conn = request("/login") |> AuthPlug.log_in(user)
+      assert conn.halted
+      assert location(conn) == "/login"
+      refute Map.has_key?(conn.assigns, :flash)
+      assert get_session(conn, AuthPlug.token_key()) == nil
+    end
+  end
+
   test "verify_second_factor with a valid code completes the step and goes where it was going" do
     {user, creds} = Mem.user!(%{})
     next_code = Mem.enroll_second_factor!(user)

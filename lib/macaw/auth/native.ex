@@ -70,8 +70,9 @@ defmodule Macaw.Auth.Native do
   (`Macaw.Auth.Native.Throttle`), the password is not checked, but a
   hash's time is still spent (the hasher's `no_user_verify/0`), so a
   blocked attempt takes as long as a checked one and the response time
-  doesn't tell a guesser when the block starts or ends. Every refusal
-  counts as a failure; a success resets the username's count.
+  doesn't tell a guesser when the block starts or ends. A throttled
+  refusal is not counted; every checked refusal counts as a failure, and
+  a success resets the username's count.
 
   Emits `[:macaw_auth, :native, :authenticate]` with `%{count: 1}` and
   `%{result: :ok | :error, reason: atom | nil, source: name | nil,

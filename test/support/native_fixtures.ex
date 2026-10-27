@@ -92,6 +92,12 @@ defmodule Macaw.Auth.Test.NativeFixtures do
   end
 
   @impl true
+  def delete!(user) do
+    Repo.delete!(Repo.get!(UserRecord, user.id))
+    :ok
+  end
+
+  @impl true
   def idle_seconds, do: Config.get().session_idle_days * 86_400
 
   @impl true

@@ -13,8 +13,9 @@ defmodule Macaw.Auth.Live do
   `:mount_current_user` only assigns. The others also guard an open page:
   it subscribes to its user's revocations and disconnects at once when its
   session is revoked, and re-checks its session every `:revalidate_ms`
-  (default 60 s) without extending it, which also refreshes the user, so a
-  role change shows at once.
+  (default 60 s) without extending it. The re-check refreshes the user and
+  applies the mount's guard again: a page whose user lost its role goes
+  home, and one whose session now owes a step goes to that step.
 
   With `config :macaw_auth, endpoint: MyAppWeb.Endpoint`, a revocation
   also has Phoenix drop the session's sockets, by the `live_socket_id`
@@ -45,27 +46,35 @@ defmodule Macaw.Auth.Live do
   defp fetch(session), do: Auth.fetch(session[Macaw.Auth.Plug.token_key()], touch: false)
 
   defp mount(session, socket, roles) do
-    with {:ok, user, user_session} <- fetch(session),
-         nil <- Auth.pending_step(user, user_session),
-         :ok <- role(user, roles) do
-      socket = socket |> assign(current_user: user, current_session: user_session) |> guard()
-      {:cont, socket}
-    else
-      :forbidden ->
-        {:halt, Phoenix.LiveView.redirect(socket, to: Auth.path(:home))}
+    case session |> fetch() |> admit(roles) do
+      {:ok, user, user_session} ->
+        socket =
+          socket
+          |> assign(current_user: user, current_session: user_session)
+          |> Phoenix.LiveView.put_private(:macaw_auth_roles, roles)
+          |> guard()
 
-      step when is_atom(step) and not is_nil(step) ->
-        {:halt, Phoenix.LiveView.redirect(socket, to: Auth.path(step))}
+        {:cont, socket}
 
-      {:error, _} ->
-        {:halt, Phoenix.LiveView.redirect(socket, to: Auth.path(:sign_in))}
+      {:redirect, to} ->
+        {:halt, Phoenix.LiveView.redirect(socket, to: to)}
     end
   end
 
-  defp role(_user, :any), do: :ok
+  # The guard, the same at mount and at every re-check: a session, then no
+  # step owed, then one of `roles` (`:any` for a signed-in page).
+  defp admit({:ok, user, user_session} = found, roles) do
+    cond do
+      step = Auth.pending_step(user, user_session) -> {:redirect, Auth.path(step)}
+      not role?(user, roles) -> {:redirect, Auth.path(:home)}
+      true -> found
+    end
+  end
 
-  defp role(user, roles),
-    do: if(Enum.any?(user.roles, &(&1 in roles)), do: :ok, else: :forbidden)
+  defp admit({:error, _}, _roles), do: {:redirect, Auth.path(:sign_in)}
+
+  defp role?(_user, :any), do: true
+  defp role?(user, roles), do: Enum.any?(user.roles, &(&1 in roles))
 
   defp guard(socket) do
     if Phoenix.LiveView.connected?(socket) do
@@ -85,13 +94,16 @@ defmodule Macaw.Auth.Live do
   end
 
   def handle_guard(:macaw_auth_recheck, socket) do
-    case Auth.fetch_by_id(socket.assigns.current_session.id, touch: false) do
+    socket.assigns.current_session.id
+    |> Auth.fetch_by_id(touch: false)
+    |> admit(socket.private.macaw_auth_roles)
+    |> case do
       {:ok, user, user_session} ->
         schedule_recheck()
         {:halt, assign(socket, current_user: user, current_session: user_session)}
 
-      {:error, _} ->
-        {:halt, Phoenix.LiveView.redirect(socket, to: Auth.path(:sign_in))}
+      {:redirect, to} ->
+        {:halt, Phoenix.LiveView.redirect(socket, to: to)}
     end
   end
 

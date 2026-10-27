@@ -34,6 +34,29 @@ defmodule Macaw.Auth.Native.SessionsTest do
 
   defp row(session), do: Repo.get!(SessionRecord, session.id)
 
+  # A revocation racing the code under test: `revoke` runs once, right after
+  # the first query on `table`, between the code's look-up and its write.
+  defp after_first_query(table, revoke) do
+    id = make_ref()
+
+    :telemetry.attach(
+      id,
+      [:macaw, :auth, :test, :repo, :query],
+      fn _event, _measurements, %{source: source}, _config ->
+        if source == table do
+          :telemetry.detach(id)
+          revoke.()
+        end
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
+  defp delete_row(session),
+    do: Repo.delete_all(where(SessionRecord, id: ^session.id))
+
   defp all_values do
     for table <- ["macaw_auth_sessions", "macaw_auth_users"],
         value <- List.flatten(Repo.query!("SELECT * FROM #{table}").rows),
@@ -104,6 +127,17 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Native.fetch_session_by_id("not-a-uuid", []) == {:error, :invalid}
       assert Native.fetch_session_by_id(Ecto.UUID.generate(), []) == {:error, :invalid}
       assert Native.fetch_session_by_id(nil, []) == {:error, :invalid}
+    end
+
+    test "a user deleted since signing in gets no session" do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:macaw_auth, :native, :session]])
+      user = user!()
+      Repo.delete_all(where(Native.UserRecord, id: ^user.id))
+
+      assert Native.create_session(user, now: @t0) == {:error, :invalid}
+      assert Native.create_session(%{user | id: "junk"}, now: @t0) == {:error, :invalid}
+      assert Repo.aggregate(SessionRecord, :count) == 0
+      refute_received {[:macaw_auth, :native, :session], ^ref, _, _}
     end
 
     test "creating a session emits telemetry without the token" do
@@ -185,6 +219,16 @@ defmodule Macaw.Auth.Native.SessionsTest do
 
       assert row(session).last_used_at == @t0
       assert Native.fetch_session_by_id(session.id, now: at(@idle + 1)) == {:error, :expired}
+    end
+
+    test "a touch racing a revocation is :invalid, never a crash" do
+      {:ok, token, session} = Native.create_session(user!(), now: @t0)
+      # The session is read, then its user: the revocation lands between
+      # the look-up and the touch's write.
+      after_first_query("macaw_auth_users", fn -> delete_row(session) end)
+
+      assert Native.fetch_session(token, touch: true, now: at(3_600)) == {:error, :invalid}
+      assert Repo.get(SessionRecord, session.id) == nil
     end
 
     test "the default is not to touch" do
@@ -350,9 +394,19 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert_raise ArgumentError, fn -> String.to_existing_atom("no_such_step_xyz") end
     end
 
-    test "completing a step of a session gone is :ok, and it stays gone" do
-      assert Native.complete_step(Ecto.UUID.generate(), :password_change, []) == :ok
-      assert Native.complete_step("junk", :second_factor, []) == :ok
+    test "completing a step of a session that doesn't exist is :invalid" do
+      for step <- Auth.steps(), id <- [Ecto.UUID.generate(), "junk"] do
+        assert Native.complete_step(id, step, []) == {:error, :invalid}
+      end
+    end
+
+    test "a password change racing a revocation is :invalid, and the session stays gone" do
+      {:ok, _token, session} = Native.create_session(user!(), [])
+      # Revoked between the step's read of the row and its write.
+      after_first_query("macaw_auth_sessions", fn -> delete_row(session) end)
+
+      assert Native.complete_step(session.id, :password_change, []) == {:error, :invalid}
+      assert Repo.get(SessionRecord, session.id) == nil
     end
   end
 end

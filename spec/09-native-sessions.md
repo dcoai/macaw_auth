@@ -15,12 +15,18 @@ The session row records:
 
 `Macaw.Auth.Native.Sessions.to_session/1` makes a row the contract's `%Macaw.Auth.Session{}`, `created_at` its `inserted_at`.
 
+**A user who no longer exists gets no session** ([01 §2.2](01-contract.md#auth-backend-create-session)). The row is inserted by one statement that selects it from the user's row (`INSERT … SELECT … FROM macaw_auth_users WHERE id = …`), so it is written only while the user exists, with no gap between a check and the insert: a user deleted since signing in inserts nothing, and `create/2` returns `{:error, :invalid}`, never the foreign-key error an insert would raise. A user id that isn't a UUID is refused the same way. No `:created` event is emitted.
+
 ```test:sessions-no-token-property
 property: for up to six sessions of a user, no column of any session or user row contains a token, its Base64, unpadded URL-safe Base64, or hex in either case; each token's SHA-256 is stored exactly once
 ```
 
 ```test:sessions-record-client
 a session made with remote_ip {203, 0, 113, 9} and a 400-character agent records "203.0.113.9" and an agent of 255 characters, and fetch gives them back
+```
+
+```test:sessions-create-deleted-user
+after the user's row is deleted, create_session is {:error, :invalid}, as it is for a user id "junk"; no session row exists, and no :created event is emitted
 ```
 
 ## 2. Looking a session up {#auth-sessions-fetch}
@@ -45,7 +51,7 @@ a random 32-byte token, "not-a-uuid", nil and an unused UUID are each {:error, :
 
 **`touch: true`** (a request) records use, but **writes `last_used_at` at most once an hour:** only when it is at least 3 600 seconds old, and then to now, by an update of that row. A write per request would make every page view a database write, which SQLite's single writer feels. **`touch: false`** (the default, and an open page's re-check) **never extends a session,** or an idle browser tab would keep it alive forever.
 
-That update asserts it changed one row: a session deleted between its look-up and the write raises `MatchError` instead of being treated as gone ([00 §6](00-overview.md#auth-gaps)).
+**A touch racing a revocation is a revoked session.** A session deleted between its look-up and the touch's write (a revocation, a sign-out elsewhere) updates no row: the look-up is then `{:error, :invalid}`, as the session is, never a crash in the request (`Macaw.Auth.Plug.fetch_current_user/2` signs it out).
 
 ```test:sessions-idle
 a session made at t0 is valid at t0 + 14 days (touch: false) and {:error, :expired} one second later, its row deleted and the event :expired / :idle emitted; then its token is :invalid
@@ -63,6 +69,10 @@ Macaw.Auth.Native.session_idle_seconds([]) and Macaw.Auth.session_idle_seconds()
 
 ```test:sessions-touch-hourly
 touch: true at 3 599 s leaves last_used_at at t0; at 3 600 s it becomes that time (stored too); at 3 660 s it stays; the session then expires 14 days after the touch, not after creation
+```
+
+```test:sessions-touch-revoked
+a session whose row is deleted, by a repo telemetry handler, between the look-up's queries and the touch at 3 600 s is {:error, :invalid}, and stays gone
 ```
 
 ```test:sessions-no-touch
@@ -110,7 +120,7 @@ through Macaw.Auth.revoke, a process subscribed to the user receives {:sessions_
 
 **Steps come back as atoms only by lookup** among `Macaw.Auth.steps/0`: a stored name that isn't one (a row from a later version) is dropped, never made an atom. `completed_steps` is `{:array, :string}`: a native array on Postgres, JSON text on SQLite.
 
-**A session that doesn't exist** (an unknown or non-UUID id) is left alone, `:ok`. But a session deleted between `:password_change`'s read of the row and its write raises `Ecto.StaleEntryError` ([00 §6](00-overview.md#auth-gaps)).
+**A session that doesn't exist** (an unknown or non-UUID id) is left alone and refused, `{:error, :invalid}` ([01 §2.6](01-contract.md#auth-backend-complete-step)). So is one deleted meanwhile: the second factor's update finds no row, and `:password_change`'s write, after its read of the row, finds the row stale (`stale_error_field`, so an error value rather than `Ecto.StaleEntryError`). A step already completed is `:ok` without a write.
 
 ```test:sessions-steps
 a session made with second_factor_passed false, after :second_factor and :password_change twice, reads second_factor_passed true and completed_steps [:password_change]; the row holds ["password_change"]
@@ -121,7 +131,11 @@ a row whose completed_steps hold "password_change" and "no_such_step_xyz" reads 
 ```
 
 ```test:sessions-steps-gone
-complete_step of an unused UUID with :password_change, and of "junk" with :second_factor, are :ok
+complete_step of an unused UUID and of "junk", with each step, is {:error, :invalid}
+```
+
+```test:sessions-steps-revoked
+a session whose row is deleted, by a repo telemetry handler, between :password_change's read and its write gives {:error, :invalid}, and stays gone
 ```
 
 ## 7. Telemetry {#auth-sessions-telemetry}

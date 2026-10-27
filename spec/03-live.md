@@ -65,16 +65,26 @@ handle_guard({:sessions_revoked, [own_id]}, socket) redirects to "/login"; handl
 
 ## 4. The re-check {#auth-live-recheck}
 
-`handle_guard(:macaw_auth_recheck, socket)` re-resolves the page's session **by id, with `touch: false`** (so an idle browser tab never keeps its session alive):
-- **still valid:** the page keeps going, `:current_user` and `:current_session` reassigned (so a changed name or role list shows in the page), and the next re-check is scheduled;
-- **gone** (revoked without the push reaching this node, expired, the user disabled): redirect to `path(:sign_in)`.
+`handle_guard(:macaw_auth_recheck, socket)` re-resolves the page's session **by id, with `touch: false`** (so an idle browser tab never keeps its session alive), and **applies the mount's guard again** (§2), in the same order, with the roles the page mounted with (kept in the socket's private `:macaw_auth_roles`, `:any` for `:require_authenticated`):
+- **gone** (revoked without the push reaching this node, expired, the user disabled): redirect to `path(:sign_in)`;
+- **a step now owed** (a password change an administrator required since, say): redirect to that step's page;
+- **a role no longer held,** on a `{:require_role, roles}` page: redirect to `path(:home)`;
+- **otherwise** the page keeps going, `:current_user` and `:current_session` reassigned (so a changed name or role list shows in the page), and the next re-check is scheduled.
 
-The re-check is the backstop for what the push doesn't carry: a session that expired, or whose user was disabled, is never announced ([01 §6](01-contract.md#auth-revocation)).
+Each redirect is `Phoenix.LiveView.redirect/2`, as at mount, and no further re-check is scheduled. So a role removed, or a step newly owed, takes an open page away within `revalidate_ms`, without a reload.
 
-**It does not re-apply the mount's guard:** a role removed from a user who opened a `{:require_role, roles}` page, or a step newly owed, leaves the page open until it is reloaded ([00 §6](00-overview.md#auth-gaps)).
+The re-check is the backstop for what the push doesn't carry: a session that expired, or whose user was disabled, is never announced ([01 §6](01-contract.md#auth-revocation)), and neither is a changed role or a newly owed step.
 
 ```test:live-recheck
 after a re-check, a live session's page keeps its user assigned; once the session is revoked, the next re-check redirects to "/login"
+```
+
+```test:live-recheck-role
+a page mounted with {:require_role, ["admin"]} by an admin, after the user's roles become ["viewer"], is redirected home by the next re-check
+```
+
+```test:live-recheck-step
+a page mounted with :require_authenticated, after the user is made to change their password, is redirected to the password change's path by the next re-check
 ```
 
 ```test:live-recheck-no-touch

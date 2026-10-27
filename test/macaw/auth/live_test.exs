@@ -14,6 +14,11 @@ defmodule Macaw.Auth.LiveTest do
   defp socket, do: %Phoenix.LiveView.Socket{assigns: %{__changed__: %{}, flash: %{}}}
   defp session(token), do: %{Macaw.Auth.Plug.token_key() => token}
 
+  defp mounted(hook, token) do
+    {:cont, socket} = Live.on_mount(hook, %{}, session(token), socket())
+    socket
+  end
+
   test "a signed-in session mounts with its user" do
     {user, _} = Mem.user!(%{})
     {:ok, token, _} = Auth.create_session(user)
@@ -53,14 +58,35 @@ defmodule Macaw.Auth.LiveTest do
   test "the re-check refreshes the user and leaves when the session is gone" do
     {user, _} = Mem.user!(%{})
     {:ok, token, session} = Auth.create_session(user)
-    {:cont, s} = Live.on_mount(:mount_current_user, %{}, session(token), socket())
+    s = mounted(:require_authenticated, token)
 
     assert {:halt, kept} = Live.handle_guard(:macaw_auth_recheck, s)
     assert kept.assigns.current_user.id == user.id
+    assert kept.redirected == nil
 
     :ok = Auth.revoke(session.id)
     assert {:halt, gone} = Live.handle_guard(:macaw_auth_recheck, s)
     assert {:redirect, %{to: "/login"}} = gone.redirected
+  end
+
+  test "the re-check sends a page whose role was removed home" do
+    {admin, _} = Mem.user!(%{roles: ["admin"]})
+    {:ok, token, _} = Auth.create_session(admin)
+    s = mounted({:require_role, ["admin"]}, token)
+
+    :ok = Mem.update_user!(admin, roles: ["viewer"])
+    assert {:halt, gone} = Live.handle_guard(:macaw_auth_recheck, s)
+    assert {:redirect, %{to: "/"}} = gone.redirected
+  end
+
+  test "the re-check sends a page whose session now owes a step to that step" do
+    {user, _} = Mem.user!(%{})
+    {:ok, token, _} = Auth.create_session(user)
+    s = mounted(:require_authenticated, token)
+
+    :ok = Mem.update_user!(user, must_change_password: true)
+    assert {:halt, gone} = Live.handle_guard(:macaw_auth_recheck, s)
+    assert {:redirect, %{to: "/password"}} = gone.redirected
   end
 
   test "other messages pass through" do

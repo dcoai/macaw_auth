@@ -39,7 +39,7 @@ The test suite carries a third, `Macaw.Auth.Test.MemoryBackend` (`test/support`)
 the application starts Macaw.Auth.Registry and Macaw.Auth.Native.Throttle; Macaw.Auth.subscribe/1 then succeeds without a :pubsub, and Throttle.check/3 answers
 ```
 
-It is released by git tag: v0.1.0, and v0.1.1, which added `Macaw.Auth.announce_revoked/2` for the Ash backend (macaw_compose#53).
+It is released by git tag: v0.1.0; v0.1.1, which added `Macaw.Auth.announce_revoked/2` for the Ash backend (macaw_compose#53); and v0.2.0, which changed the backend contract: `session_idle_seconds/1` is a new callback, for the remember cookie (macaw_compose#77), `create_session/2` and `complete_step/3` may refuse with `{:error, :invalid}`, and the kit's fixtures delete users (`delete!/1`) (macaw_compose#74). A backend written for v0.1 must follow all three.
 
 ## 4. The boundary with Macaw composition {#auth-boundary}
 
@@ -58,23 +58,11 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 
 ## 6. Known gaps {#auth-gaps}
 
-Found while writing this spec from the code (v0.1.1); each section states what the code does, and these are open for the owner's decision.
-
-**Bugs:**
-- **A touch racing a revocation crashes the request.** `Macaw.Auth.Native.Sessions` records use with `{1, _} = repo.update_all(…)`; a session deleted between its look-up and that write (a revocation, a sign-out elsewhere) updates no row and raises `MatchError` in `fetch_current_user/2`, where the expiry and disabled paths treat "gone already" as gone ([09 §3](09-native-sessions.md#auth-sessions-touch)). Reproduced by deleting the row from a repo telemetry handler between the two queries.
-- **Completing a step racing a revocation raises.** `Macaw.Auth.Native.Sessions.complete_step/3` is documented to leave a session gone meanwhile gone and return `:ok`, but for `:password_change` it loads the row and then `repo.update!/1`s it, which raises `Ecto.StaleEntryError` when the row was deleted in between ([09 §6](09-native-sessions.md#auth-sessions-steps)). Reproduced the same way.
-- **An open page's re-check doesn't re-apply its guard.** `Macaw.Auth.Live`'s re-check refreshes the user and session, but checks neither the role a `{:require_role, roles}` page mounted with nor a newly owed step: a page mounted as `admin` stays open after the role is removed, until it is reloaded. Its moduledoc says a role change "shows at once" ([03 §4](03-live.md#auth-live-recheck)). Shown with the memory backend: the re-check after the role's removal leaves `redirected` nil.
+Found while writing this spec from the code (v0.1.1); each section states what the code does, and these are open for the owner's decision. The bugs and smaller faults found then were fixed in v0.2.0 (macaw_compose#74).
 
 **Gaps against the proposal (macaw_compose#32, #51):**
 - **Not implemented:** first-admin bootstrap and a `mix macaw_auth.user` task; the `authorize/3` callback; warnings at boot on `verify_peer: false` and on a no-authentication mode; a `Store` behavior (the native backend is Ecto only).
 - **The backend has no default.** The proposal made native the default backend; `Macaw.Auth.backend/0` raises when `:backend` is unset ([01 §1.1](01-contract.md#auth-backend-config)).
-- **The kit checks less than proposed.** It checks replay and revocation, but not timing parity, escaping or the throttle, which are the native backend's own tests; `Macaw.Auth.Backend`'s moduledoc says the kit checks that an unknown user and a wrong password take the same time, and it doesn't ([04 §2](04-conformance.md#auth-kit-checks)).
+- **The kit checks less than proposed.** It checks replay and revocation, but not timing parity, escaping or the throttle, which are the native backend's own tests ([04 §2](04-conformance.md#auth-kit-checks)).
 - **A completed step is the host's word.** `Macaw.Auth.complete_step/3` marks `:second_factor` or `:second_factor_enroll` passed without a code or an enrollment: the second factor's page must go through `Macaw.Auth.Plug.verify_second_factor/2`, and enrollment's must call it only after `Macaw.Auth.Native.enroll_confirm/3` succeeded ([01 §4](01-contract.md#auth-steps)).
-
-**Smaller faults:**
-- `Macaw.Auth.Native.Config`'s moduledoc names the error `Macaw.Auth.Native.ConfigError`; the module is `Macaw.Auth.Native.Config.Error` ([05 §2](05-native-config.md#auth-native-config)).
-- `Macaw.Auth.Native.authenticate/2`'s doc says every refusal counts as a failure; a refusal while throttled does not ([05 §1.2](05-native-config.md#auth-native-throttled)).
-- `Macaw.Auth.Native.Hasher.check/1` accepts any loaded module that exports `hash/1`, not only one implementing the behavior ([08 §1](08-native-hashers.md#auth-hasher-behavior)).
-- `Macaw.Auth.path/1` raises `FunctionClauseError` for a name that is neither configured nor one of the six it knows ([01 §3](01-contract.md#auth-paths)).
-- `Macaw.Auth.viewer/1`'s doc cites "Macaw spec 02 §2", which no longer exists; the viewer is in [macaw_compose 01 §2](https://gitlab.conet.yarina.org/dco-tek/macaw_compose/-/blob/main/spec/01-vocabulary.md#vocab-data). No viewer behavior module exists in `macaw_compose` yet for `viewer/1` to implement.
-- The repository README still calls the plugs "plain-Plug guards" and the Ash backend "later"; macaw_compose 00 §4 lists Phoenix LiveView as optional. Both predate the decision of 2026-10-27 and v0.1.0 of macaw_auth_ash.
+- **No viewer behavior to implement.** `macaw_compose` has no viewer behavior module yet for `Macaw.Auth.viewer/1` to implement ([01 §8](01-contract.md#auth-viewer)).

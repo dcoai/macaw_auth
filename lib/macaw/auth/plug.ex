@@ -220,22 +220,36 @@ defmodule Macaw.Auth.Plug do
   and `secure` exactly when the request is https. Without it, a remember
   cookie the browser sent is deleted. Other `opts` go to
   `Macaw.Auth.create_session/2`.
+
+  When the backend refuses the session (`{:error, :invalid}`: the user no
+  longer exists), the sign-in fails: back to the sign-in page, with an
+  error flash when the pipeline ran `fetch_flash`, and neither the session
+  nor any cookie touched.
   """
   def log_in(conn, user, opts \\ []) do
     {remember, opts} = Keyword.pop(opts, :remember, false)
 
-    {:ok, token, session} =
-      Auth.create_session(
-        user,
-        Keyword.merge(
-          [
-            remote_ip: client_ip(conn),
-            user_agent: conn |> get_req_header("user-agent") |> List.first()
-          ],
-          opts
-        )
+    session_opts =
+      Keyword.merge(
+        [
+          remote_ip: client_ip(conn),
+          user_agent: conn |> get_req_header("user-agent") |> List.first()
+        ],
+        opts
       )
 
+    case Auth.create_session(user, session_opts) do
+      {:ok, token, session} ->
+        logged_in(conn, user, token, session, remember)
+
+      {:error, :invalid} ->
+        conn
+        |> flash(:error, "You could not be signed in.")
+        |> redirect(Auth.path(:sign_in))
+    end
+  end
+
+  defp logged_in(conn, user, token, session, remember) do
     return_to = get_session(conn, @return_key)
 
     conn
@@ -289,21 +303,21 @@ defmodule Macaw.Auth.Plug do
 
   @doc """
   Records a step the current session completed and sends it on: to the next
-  step, else where it was going.
+  step, else where it was going. A session that no longer exists (revoked
+  meanwhile) is logged out.
   """
   def complete_step(conn, step) do
-    :ok = Auth.complete_step(conn.assigns.current_session.id, step)
+    id = conn.assigns.current_session.id
 
-    case Auth.fetch_by_id(conn.assigns.current_session.id) do
-      {:ok, user, session} ->
-        conn
-        |> assign(:current_user, user)
-        |> assign(:current_session, session)
-        |> assign(:pending_step, Auth.pending_step(user, session))
-        |> continue()
-
-      {:error, _} ->
-        log_out(conn)
+    with :ok <- Auth.complete_step(id, step),
+         {:ok, user, session} <- Auth.fetch_by_id(id) do
+      conn
+      |> assign(:current_user, user)
+      |> assign(:current_session, session)
+      |> assign(:pending_step, Auth.pending_step(user, session))
+      |> continue()
+    else
+      {:error, _} -> log_out(conn)
     end
   end
 

@@ -36,7 +36,7 @@ defmodule Macaw.Auth.Native.Config do
 
   A source map may use string keys and a string `type`, as a JSON or
   `config.exs` file writes it; those become atoms only by lookup among the
-  known ones. `load!/0` raises `Macaw.Auth.Native.ConfigError` with the
+  known ones. `load!/0` raises `Macaw.Auth.Native.Config.Error` with the
   fault (`sources[nas].host: is required`); it runs when the application
   starts with `backend: Macaw.Auth.Native`, so a bad configuration refuses
   boot rather than a sign-in, and the result is kept in

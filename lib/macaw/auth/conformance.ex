@@ -8,9 +8,9 @@ defmodule Macaw.Auth.Conformance do
       end
 
   The fixtures module implements `Macaw.Auth.Conformance.Fixtures`: it resets
-  the backend's store, makes users, disables them, says how long a session
-  may idle, and lists every value the backend stores for sessions, so the
-  kit can prove no token is stored as it is.
+  the backend's store, makes users, disables and deletes them, says how
+  long a session may idle, and lists every value the backend stores for
+  sessions, so the kit can prove no token is stored as it is.
 
   A backend still being built may name a capability it doesn't have yet
   with `pending: [second_factor: "why"]`: the kit's tests that need it
@@ -22,6 +22,7 @@ defmodule Macaw.Auth.Conformance do
   - valid credentials sign in; a wrong password and an unknown user are the
     same refusal (no enumeration); a disabled user is refused;
   - a session round-trips by token and by id; a garbage token is invalid;
+  - a user deleted since signing in gets no session (`{:error, :invalid}`);
   - **no session token is ever stored as it is**;
   - revoking one session, or all but one, ends them, and **tells a
     subscribed process** (an open page) which ids ended;
@@ -30,6 +31,7 @@ defmodule Macaw.Auth.Conformance do
     `idle_seconds/0` (the remember cookie's lifetime); a disabled user's
     live session is refused;
   - a user's sessions list newest first;
+  - completing a step of a revoked session is `{:error, :invalid}`;
   - a user with a second factor owes it, and completing the step clears it;
     a user enrolled through the fixture is reported `:enrolled`; a valid
     code passes the step (`Macaw.Auth.verify_second_factor/3`), a wrong
@@ -51,6 +53,12 @@ defmodule Macaw.Auth.Conformance do
 
     @doc "Disables a user."
     @callback disable!(Macaw.Auth.User.t()) :: :ok
+
+    @doc """
+    Deletes a user from the backend's store, as an administrator would,
+    after they signed in: the kit then asks for a session for them.
+    """
+    @callback delete!(Macaw.Auth.User.t()) :: :ok
 
     @doc "How long a session may idle before it expires, in seconds."
     @callback idle_seconds() :: pos_integer()
@@ -130,6 +138,13 @@ defmodule Macaw.Auth.Conformance do
           assert {:ok, %{id: uid}, %{id: sid}} = Auth.fetch(token)
           assert {uid, sid} == {user.id, session.id}
           assert {:ok, _, %{id: ^sid}} = Auth.fetch_by_id(session.id)
+        end
+
+        test "a user deleted since signing in gets no session" do
+          {user, _} = @fixtures.user!(%{})
+          :ok = @fixtures.delete!(user)
+          assert Auth.create_session(user) == {:error, :invalid}
+          assert Auth.list_sessions(user.id) == []
         end
 
         test "a garbage token is invalid" do
@@ -224,6 +239,15 @@ defmodule Macaw.Auth.Conformance do
           {user, _} = @fixtures.user!(%{})
           {:ok, _token, session} = Auth.create_session(user)
           assert Auth.pending_step(user, session) == nil
+        end
+
+        test "completing a step of a revoked session is invalid" do
+          {user, _} = @fixtures.user!(%{})
+          {:ok, token, session} = Auth.create_session(user)
+          :ok = Auth.revoke(session.id)
+
+          assert Auth.complete_step(session.id, :password_change) == {:error, :invalid}
+          assert Auth.fetch(token) == {:error, :invalid}
         end
       end
 

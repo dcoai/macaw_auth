@@ -50,6 +50,36 @@ defmodule Macaw.Auth.Native.HasherTest do
     assert {:error, "hasher: must be a module" <> _} = Hasher.check("bcrypt")
   end
 
+  defmodule OnlyHash do
+    def hash(password), do: password
+  end
+
+  test "a module with hash/1 but not the whole behavior is refused" do
+    assert Hasher.check(OnlyHash) ==
+             {:error, "hasher: #{inspect(OnlyHash)} is not a Macaw.Auth.Native.Hasher"}
+
+    assert Hasher.check(Macaw.Auth.Test.CountingHasher) == :ok
+  end
+
+  test "every callback is required: a module lacking any one of them is refused" do
+    {:docs_v1, _, _, _, _, _, docs} = Code.fetch_docs(Hasher)
+    callbacks = for {{:callback, name, arity}, _, _, _, _} <- docs, do: {name, arity}
+    assert length(callbacks) == 5
+
+    for {name, arity} = lacking <- callbacks do
+      module = Module.concat(__MODULE__, "Lacking#{name}#{arity}")
+
+      defs =
+        for {n, a} <- callbacks, {n, a} != lacking do
+          args = for i <- 1..a//1, do: Macro.var(:"_arg#{i}", nil)
+          quote do: def(unquote(n)(unquote_splicing(args)), do: nil)
+        end
+
+      Module.create(module, defs, Macro.Env.location(__ENV__))
+      assert {:error, "hasher: " <> _} = Hasher.check(module)
+    end
+  end
+
   describe "rehash at sign-in" do
     test "a hash at an old cost is replaced on a successful sign-in" do
       local_user!("cost", "a long password")

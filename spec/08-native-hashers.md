@@ -14,14 +14,16 @@ How `Macaw.Auth.Native` hashes passwords: a behavior with two implementations, b
 **Each library is an optional dependency, and each implementation is compiled only when its library is,** so a host carries only the NIF it chose.
 
 `Macaw.Auth.Native.Hasher.check/1` is how the configuration checks its `hasher` ([05 §2](05-native-config.md#auth-native-config)), so a missing library is refused when the configuration is read (at boot), never at the first sign-in:
-- **`:ok`** for a loaded module that exports `hash/1`;
+- **`:ok`** for a loaded module that exports **every callback of the behavior** (`hash/1`, `verify/2`, `no_user_verify/0`, `needs_rehash?/1`, `owns?/1`), so a module that only hashes is refused at boot, not at the first sign-in that needs the rest;
 - **`Bcrypt` or `Argon2` without its library:** `"hasher: Macaw.Auth.Native.Hasher.Bcrypt needs its library; add {:bcrypt_elixir, \"~> 3.2\"} to the host's deps"` (argon2: `{:argon2_elixir, "~> 4.1"}`);
-- **any other module:** `"hasher: <module> is not a Macaw.Auth.Native.Hasher"`; **a non-module:** `"hasher: must be a module, got <value>"`.
-
-The check looks for `hash/1`, not the whole behavior ([00 §6](00-overview.md#auth-gaps)).
+- **any other module,** one missing a callback included: `"hasher: <module> is not a Macaw.Auth.Native.Hasher"`; **a non-module:** `"hasher: must be a module, got <value>"`.
 
 ```test:hasher-check
 check(Bcrypt) is :ok; check(String) is {:error, "hasher: String is not a Macaw.Auth.Native.Hasher"}; check("bcrypt") is {:error, "hasher: must be a module" <> _}
+```
+
+```test:hasher-check-whole-behavior
+a module defining only hash/1 is {:error, "hasher: <module> is not a Macaw.Auth.Native.Hasher"}; the test suite's counting hasher, implementing every callback, is :ok
 ```
 
 ## 2. The two algorithms {#auth-hasher-algorithms}

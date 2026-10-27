@@ -113,6 +113,12 @@ a signed-in request to /login is sent home; a signed-out one passes unhalted
 5. assigns `:current_user`, `:current_session` and `:pending_step`;
 6. **continues** (§7.1).
 
+**When the backend refuses the session** (`{:error, :invalid}`: the user was deleted since signing in, [01 §2.2](01-contract.md#auth-backend-create-session)), the sign-in fails cleanly instead: an error flash, **`"You could not be signed in."`**, when the pipeline ran `fetch_flash` (without it, no message), and a redirect to `path(:sign_in)`, halted. **Nothing else is touched:** no token or `live_socket_id` is put in the session, the session is neither renewed nor cleared, no remember cookie is set or deleted, whatever `remember:` says, and `:current_user`, `:current_session` and `:pending_step` are left as they were. It never raises.
+
+```test:plug-log-in-refused
+log_in(remember: true) of a user the memory backend deleted, after fetch_flash, is halted with 302 to the sign-in path and the error flash "You could not be signed in."; the session holds no token and no "live_socket_id", no remember cookie is set, and the user has no session; without fetch_flash, the same, with no :flash assigned
+```
+
 `Macaw.Auth.Plug.log_out/1` revokes the current session, if there is one, through `Macaw.Auth.revoke/2` (so its open pages disconnect, and with `:endpoint` its LiveView sockets, [01 §6](01-contract.md#auth-revocation)), renews and clears the session, **deletes the remember cookie** when the browser sent one, and redirects to `path(:sign_in)`, halted.
 
 ```test:plug-log-in
@@ -141,10 +147,14 @@ log_out revokes the session (its token no longer resolves), a subscriber hears {
 
 ### 7.2 Completing a step {#auth-plug-complete-step}
 
-`Macaw.Auth.Plug.complete_step/2` (`conn`, `step`) records a step the current session completed (`Macaw.Auth.complete_step/3`), re-reads the session by id, reassigns user, session and pending step, and continues (§7.1). **A session that no longer resolves** is logged out (§7). Enrollment's page calls it with `:second_factor_enroll` after the backend confirmed the enrollment, and the password page with `:password_change`.
+`Macaw.Auth.Plug.complete_step/2` (`conn`, `step`) records a step the current session completed (`Macaw.Auth.complete_step/3`), re-reads the session by id, reassigns user, session and pending step, and continues (§7.1). **A session the backend refuses the step for** (`{:error, :invalid}`, revoked meanwhile, [01 §2.6](01-contract.md#auth-backend-complete-step)), **or that no longer resolves,** is logged out (§7). Enrollment's page calls it with `:second_factor_enroll` after the backend confirmed the enrollment, and the password page with `:password_change`.
 
 ```test:plug-complete-step
 a session owing :second_factor, after complete_step(conn, :second_factor), has a nil pending step and is redirected home
+```
+
+```test:plug-complete-step-revoked
+a session revoked after the request was fetched, after complete_step(conn, :password_change), is halted with 302 to the sign-in path, its session holding no token
 ```
 
 ## 8. The second factor's page {#auth-plug-verify}

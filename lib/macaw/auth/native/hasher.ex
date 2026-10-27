@@ -43,12 +43,13 @@ defmodule Macaw.Auth.Native.Hasher do
 
   @doc """
   Whether `module` can hash here: compiled (its library is loaded) and
-  implementing this behavior. `:ok` or `{:error, message}`.
+  implementing this behavior, every callback of it. `:ok` or
+  `{:error, message}`.
   """
   @spec check(module()) :: :ok | {:error, String.t()}
   def check(module) when is_atom(module) do
     cond do
-      Code.ensure_loaded?(module) and function_exported?(module, :hash, 1) ->
+      Code.ensure_loaded?(module) and hasher?(module) ->
         :ok
 
       module == Macaw.Auth.Native.Hasher.Bcrypt ->
@@ -63,6 +64,14 @@ defmodule Macaw.Auth.Native.Hasher do
   end
 
   def check(other), do: {:error, "hasher: must be a module, got #{inspect(other)}"}
+
+  # Every callback, not just `hash/1`: a module that only hashes would fail
+  # at the first sign-in instead of at boot.
+  defp hasher?(module) do
+    Enum.all?(__MODULE__.behaviour_info(:callbacks), fn {name, arity} ->
+      function_exported?(module, name, arity)
+    end)
+  end
 
   defp missing(module, dep),
     do: "hasher: #{inspect(module)} needs its library; add #{dep} to the host's deps"

@@ -9,12 +9,12 @@ What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Maca
 | Function | Calls | Returns |
 |---|---|---|
 | `Macaw.Auth.authenticate/2` | `authenticate/2` | `{:ok, user}` or `{:error, refusal}` |
-| `Macaw.Auth.create_session/2` | `create_session/2` (§5) | `{:ok, token, session}` |
+| `Macaw.Auth.create_session/2` | `create_session/2` (§5) | `{:ok, token, session}` or `{:error, :invalid}` |
 | `Macaw.Auth.fetch/2` | `fetch_session/2` | `{:ok, user, session}` or `{:error, reason}` |
 | `Macaw.Auth.fetch_by_id/2` | `fetch_session_by_id/2` | `{:ok, user, session}` or `{:error, reason}` |
 | `Macaw.Auth.session_idle_seconds/1` | `session_idle_seconds/1` (§2.8) | the idle limit, in seconds |
 | `Macaw.Auth.list_sessions/2` | `list_sessions/2` | the user's sessions, newest first |
-| `Macaw.Auth.complete_step/3` | `complete_step/3` | `:ok` |
+| `Macaw.Auth.complete_step/3` | `complete_step/3` | `:ok` or `{:error, :invalid}` |
 | `Macaw.Auth.verify_second_factor/3` | `verify_second_factor/3` | `:ok` or `{:error, reason}` |
 | `Macaw.Auth.revoke/2` | `revoke_sessions/2`, then the push (§6) | `:ok` |
 
@@ -65,6 +65,12 @@ for each backend: a wrong password and an unknown username give the same {:error
 
 `create_session(user, opts)` starts a session for a user who passed `authenticate/2`: `{:ok, token, %Macaw.Auth.Session{}}`, the token for the client only. Options: `:remote_ip`, `:user_agent`, `:second_factor_passed` (the facade always sets it, §5), `:now`.
 
+**A user who no longer exists gets no session:** when the user was deleted between signing in and this call, the backend returns **`{:error, :invalid}`**, never a crash and never a session for a user who is gone. `Macaw.Auth.Plug.log_in/3` then fails the sign-in cleanly ([02 §7](02-plugs.md#auth-plug-log-in)), and the kit checks it with its fixtures' `delete!/1` ([04 §2](04-conformance.md#auth-kit-checks)). Added in v0.2.0: before it, the callback allowed only `{:ok, token, session}`.
+
+```test:create-session-deleted-user
+for each backend: a user deleted after signing in gets {:error, :invalid} from Macaw.Auth.create_session/2, and lists no session
+```
+
 ### 2.3 fetch_session/2 and fetch_session_by_id/2 {#auth-backend-fetch}
 
 `fetch_session(token, opts)` resolves a token: `{:ok, user, session}`, or `{:error, :invalid | :expired | :disabled}`:
@@ -85,6 +91,12 @@ for each backend: a wrong password and an unknown username give the same {:error
 ### 2.6 complete_step/3 {#auth-backend-complete-step}
 
 `complete_step(session_id, step, opts)` records that a session completed a step (§4): `:second_factor` and `:second_factor_enroll` mark its second factor passed; `:password_change` joins its completed steps. `:ok`.
+
+**A session that doesn't exist** (never did, or revoked meanwhile, even between the backend's read and its write) is **`{:error, :invalid}`**, never a raise, and stays gone. `Macaw.Auth.Plug.complete_step/2` then logs out ([02 §7.2](02-plugs.md#auth-plug-complete-step)). Added in v0.2.0: before it, the callback allowed only `:ok`.
+
+```test:complete-step-revoked
+for each backend: complete_step of a revoked session's id with :password_change is {:error, :invalid}, and its token stays :invalid
+```
 
 ### 2.7 verify_second_factor/3 {#auth-backend-verify}
 
@@ -111,7 +123,11 @@ Macaw.Auth.session_idle_seconds/0 with the native backend is 14 × 86 400 by def
 | `:second_factor_enroll` | `"/second-factor/enroll"` |
 | `:password_change` | `"/password"` |
 
-A configured map need name only what it changes; the rest keep their defaults. A name neither configured nor in the table raises `FunctionClauseError`.
+A configured map need name only what it changes; the rest keep their defaults, and it may add names of its own. **A name neither configured nor in the table raises `ArgumentError`** naming it and the known names: `"unknown path :reports: neither configured (config :macaw_auth, paths:) nor one of :home, :password_change, …"`.
+
+```test:paths-unknown
+with paths %{reports: "/reports"}, path(:reports) is "/reports", and path(:no_such_path) raises ArgumentError whose message contains ":no_such_path"
+```
 
 ```test:paths-defaults
 with no :paths, each name of the table gives its default; with paths %{home: "/home"}, path(:home) is "/home" and path(:sign_in) is still "/login"

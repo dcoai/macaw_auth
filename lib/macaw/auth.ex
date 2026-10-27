@@ -38,23 +38,40 @@ defmodule Macaw.Auth do
 
   @steps [:second_factor, :second_factor_enroll, :password_change]
 
+  @default_paths %{
+    sign_in: "/login",
+    sign_out: "/logout",
+    home: "/",
+    second_factor: "/login/second-factor",
+    second_factor_enroll: "/second-factor/enroll",
+    password_change: "/password"
+  }
+
+  @known_paths @default_paths |> Map.keys() |> Enum.sort() |> Enum.map_join(", ", &inspect/1)
+
   @doc "The configured backend module."
   @spec backend() :: module()
   def backend, do: Application.fetch_env!(:macaw_auth, :backend)
 
-  @doc "A configured path (`:sign_in`, `:home`, a step)."
+  @doc """
+  A configured path (`:sign_in`, `:home`, a step), else its default. A
+  name neither configured nor one of the defaults raises `ArgumentError`
+  naming it.
+  """
   @spec path(atom()) :: String.t()
   def path(name) do
     paths = Application.get_env(:macaw_auth, :paths, %{})
-    Map.get(paths, name) || default_path(name)
-  end
 
-  defp default_path(:sign_in), do: "/login"
-  defp default_path(:sign_out), do: "/logout"
-  defp default_path(:home), do: "/"
-  defp default_path(:second_factor), do: "/login/second-factor"
-  defp default_path(:second_factor_enroll), do: "/second-factor/enroll"
-  defp default_path(:password_change), do: "/password"
+    case Map.get(paths, name) || Map.get(@default_paths, name) do
+      nil ->
+        raise ArgumentError,
+              "unknown path #{inspect(name)}: neither configured (config :macaw_auth, paths:) " <>
+                "nor one of #{@known_paths}"
+
+      path ->
+        path
+    end
+  end
 
   @doc "The steps, in the order a session owes them."
   @spec steps() :: [step()]
@@ -92,9 +109,11 @@ defmodule Macaw.Auth do
 
   @doc """
   Starts a session. The second factor counts as passed unless the user has
-  one enrolled or required, which the session then owes.
+  one enrolled or required, which the session then owes. `{:error,
+  :invalid}` when the backend refuses it (the user no longer exists).
   """
-  @spec create_session(User.t(), keyword()) :: {:ok, binary(), Session.t()}
+  @spec create_session(User.t(), keyword()) ::
+          {:ok, binary(), Session.t()} | {:error, :invalid}
   def create_session(%User{} = user, opts \\ []) do
     passed = Keyword.get(opts, :second_factor_passed, user.second_factor == :none)
     backend().create_session(user, Keyword.put(opts, :second_factor_passed, passed))
@@ -121,8 +140,11 @@ defmodule Macaw.Auth do
   @spec list_sessions(term(), keyword()) :: [Session.t()]
   def list_sessions(user_id, opts \\ []), do: backend().list_sessions(user_id, opts)
 
-  @doc "Records a completed step on a session."
-  @spec complete_step(term(), step(), keyword()) :: :ok
+  @doc """
+  Records a completed step on a session: `:ok`, or `{:error, :invalid}`
+  when the session no longer exists (revoked meanwhile).
+  """
+  @spec complete_step(term(), step(), keyword()) :: :ok | {:error, :invalid}
   def complete_step(session_id, step, opts \\ []) when step in @steps,
     do: backend().complete_step(session_id, step, opts)
 
@@ -214,7 +236,7 @@ defmodule Macaw.Auth do
   @doc """
   The viewer for a Macaw page: `%{id, username, roles, source}`, or nil when
   signed out. Identity and access only; display preferences are state,
-  never part of the viewer (Macaw spec 02 §2).
+  never part of the viewer (macaw_compose spec 01 §2).
   """
   @spec viewer(Plug.Conn.t() | map()) :: map() | nil
   def viewer(%{assigns: assigns}), do: viewer(assigns)
