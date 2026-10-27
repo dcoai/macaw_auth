@@ -89,15 +89,23 @@ defmodule Macaw.Auth.Native.Throttle do
   @doc "Records a failure for `username` and `ip` at `now`."
   @spec failure(user(), String.t() | nil, integer()) :: :ok
   def failure(username, ip, now) do
-    for key <- keys(username, ip) do
-      # Both atomic: concurrent failures each count, and the last-failure
-      # time is one of theirs.
-      :ets.update_counter(@table, key, {2, 1}, {key, 0, now})
-      :ets.update_element(@table, key, {3, now})
-    end
-
+    for key <- keys(username, ip), do: :ets.update_counter(@table, key, count(now), {key, 0, now})
     :ok
   end
+
+  # One failure, in one atomic update of the row: one more failure, and the
+  # later of the row's time and `now`. Concurrent failures each count, and
+  # the row keeps the latest of their times, whichever is recorded last: a
+  # sign-in takes `now` before it hashes, so an earlier `now` can arrive
+  # second. (Counting, then writing `now` in a second call, let it overwrite
+  # a later time, and let a check between the two see the new count from the
+  # old time: both shortened the wait, spec/10 §7.)
+  #
+  # `update_counter` has no max, so the second and third operations make
+  # one: the time less one, raised to `now - 1` if it is below that, then
+  # plus one, is `max(last, now)`. Operations on one position apply in
+  # order, all in the one update.
+  defp count(now), do: [{2, 1}, {3, -1, now - 1, now - 1}, {3, 1}]
 
   @doc "A success resets the username's count (not the address's)."
   @spec success(user()) :: :ok

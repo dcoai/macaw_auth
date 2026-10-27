@@ -164,6 +164,35 @@ defmodule Macaw.Auth.Native.ThrottleTest do
     end
   end
 
+  describe "a failure is one atomic update" do
+    # spec/10 §6-7: the count and the time change together, and the time is the
+    # latest failure's, in whatever order the failures arrive.
+    test "a failure that arrives second keeps the later time" do
+      for _ <- 1..5, do: Throttle.failure("yan", "192.0.2.4", ms(0))
+      Throttle.failure("yan", "192.0.2.4", ms(2_000))
+      Throttle.failure("yan", "192.0.2.4", ms(1_000))
+
+      assert :ets.lookup(Throttle, {:user, "yan"}) == [{{:user, "yan"}, 7, ms(2_000)}]
+      assert :ets.lookup(Throttle, {:ip, "192.0.2.4"}) == [{{:ip, "192.0.2.4"}, 7, ms(2_000)}]
+      # Seven failures wait 4 s from the latest, at 2 000, not from the one at 1 000.
+      assert Throttle.check("yan", "192.0.2.4", ms(5_999)) == {:delay, 1}
+      assert Throttle.check("yan", "192.0.2.4", ms(6_000)) == :ok
+    end
+
+    test "concurrent failures each count, and the latest time stands" do
+      times = Enum.shuffle(1..400)
+
+      times
+      |> Task.async_stream(&Throttle.failure("zed", "192.0.2.5", ms(&1)),
+        max_concurrency: System.schedulers_online() * 4
+      )
+      |> Stream.run()
+
+      assert :ets.lookup(Throttle, {:user, "zed"}) == [{{:user, "zed"}, 400, ms(400)}]
+      assert :ets.lookup(Throttle, {:ip, "192.0.2.5"}) == [{{:ip, "192.0.2.5"}, 400, ms(400)}]
+    end
+  end
+
   describe "the sweep" do
     test "forgets keys whose last failure is over a day old" do
       day = 24 * 60 * 60 * 1000

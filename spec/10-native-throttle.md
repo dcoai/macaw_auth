@@ -39,7 +39,7 @@ five failures at five usernames with no address: a sixth username's attempt is c
 - **from the fifth, `2^(n-5)` seconds:** 1 s after five, 2 s after six, 4, 8, 16 …;
 - **capped at 15 minutes** (900 000 ms), which `n` = 15 and beyond reach.
 
-**The wait runs from the key's last failure.** An attempt inside it is refused, `:throttled`, **without checking the password** ([05 §1.2](05-native-config.md#auth-native-throttled)), and is not counted; an attempt after it is checked as usual, and another failure doubles the next wait.
+**The wait runs from the key's last failure:** the latest failure's time, whichever order failures are recorded in (§6). An attempt inside it is refused, `:throttled`, **without checking the password** ([05 §1.2](05-native-config.md#auth-native-throttled)), and is not counted; an attempt after it is checked as usual, and another failure doubles the next wait.
 
 **Nothing is ever locked for good:** the right password succeeds once the wait has passed, so a guesser can't lock a user out for longer than the cap.
 
@@ -106,7 +106,17 @@ at bcrypt cost 9, the medians of nine blocked and nine checked attempts are with
 
 ## 6. The table and its sweep {#auth-throttle-table}
 
-The counts live in a named, public ETS table, `Macaw.Auth.Native.Throttle`, owned by the throttle's process, which the `macaw_auth` application starts ([00 §3](00-overview.md#auth-dependencies)). A row is `{key, failures, last_failure_ms}`. **A failure updates it atomically:** the count by `:ets.update_counter/4`, then the last-failure time, so concurrent failures each count.
+The counts live in a named, public ETS table, `Macaw.Auth.Native.Throttle`, owned by the throttle's process, which the `macaw_auth` application starts ([00 §3](00-overview.md#auth-dependencies)). A row is `{key, failures, last_failure_ms}`. **A failure updates it in one atomic step:** one `:ets.update_counter/4` call adds one to the count and sets the time to the later of the row's and the failure's own (operations on the time: minus one, raised to `now - 1` if below it, plus one). So concurrent failures each count, and the row holds the latest failure's time whichever is recorded last. A sign-in takes `now` before it hashes, so a failure with an earlier `now` can be recorded second.
+
+The throttle first counted, then wrote the failure's own `now` in a second call, `:ets.update_element/3`. A model of the throttle (macaw_compose#67) found two ways that shortened a wait: a failure recorded second overwrote a later time with its earlier one, and a check between the two calls read the new count from the old time. Both are fixed by the one update.
+
+```test:throttle-failure-order
+five failures at 0, then one at 2 000 and one at 1 000, recorded in that order: both rows hold 7 failures at 2 000; check gives {:delay, 1} at 5 999 and :ok at 6 000
+```
+
+```test:throttle-failure-concurrent
+400 failures at shuffled times 1-400 from concurrent tasks: each row holds 400 failures at 400
+```
 
 **Idle keys are swept.** `Macaw.Auth.Native.Throttle.sweep/1` (`now`) forgets every key whose last failure is more than a day old, and returns how many it forgot. The owner runs it every `:sweep_every_ms` (default ten minutes) on its `:clock` (default the system clock), both options of `Macaw.Auth.Native.Throttle.start_link/1`. So the table holds recent failures only, whatever an attacker sends. A day is longer than the cap, so a swept key had no wait left.
 
@@ -119,3 +129,4 @@ uma's five failures at 0 and vic's one at a day: sweep at a day forgets nothing;
 ```test:throttle-sweep-owner
 a failure two days old and one now: a :sweep sent to the owner forgets the first and keeps the second
 ```
+
