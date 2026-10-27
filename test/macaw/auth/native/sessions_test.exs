@@ -143,6 +143,13 @@ defmodule Macaw.Auth.Native.SessionsTest do
       assert Native.fetch_session(token, now: at(86_401)) == {:error, :expired}
     end
 
+    test "the backend reports its idle limit in seconds" do
+      assert Native.session_idle_seconds([]) == @idle
+      assert Auth.session_idle_seconds() == @idle
+      configure!(session_idle_days: 1)
+      assert Native.session_idle_seconds([]) == 86_400
+    end
+
     test "touch: true writes last_used_at at most hourly, and so extends the session" do
       {:ok, token, session} = Native.create_session(user!(), now: @t0)
 

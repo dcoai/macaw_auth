@@ -26,7 +26,9 @@ defmodule Macaw.Auth.Conformance do
   - revoking one session, or all but one, ends them, and **tells a
     subscribed process** (an open page) which ids ended;
   - an idle session expires, and a re-check (`touch: false`) never extends
-    one; a disabled user's live session is refused;
+    one; the backend's `session_idle_seconds/1` is the fixture's
+    `idle_seconds/0` (the remember cookie's lifetime); a disabled user's
+    live session is refused;
   - a user's sessions list newest first;
   - a user with a second factor owes it, and completing the step clears it;
     a user enrolled through the fixture is reported `:enrolled`; a valid
@@ -193,6 +195,10 @@ defmodule Macaw.Auth.Conformance do
 
           past = DateTime.add(now, idle + 5, :second)
           assert Auth.fetch(token, touch: false, now: past) == {:error, :expired}
+        end
+
+        test "the backend reports the idle limit it expires sessions by" do
+          assert Auth.session_idle_seconds() == @fixtures.idle_seconds()
         end
 
         test "a disabled user's live session is refused" do

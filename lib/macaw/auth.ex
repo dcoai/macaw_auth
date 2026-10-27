@@ -9,7 +9,8 @@ defmodule Macaw.Auth do
         paths: %{sign_in: "/login", sign_out: "/logout", home: "/",
                  second_factor: "/login/totp", second_factor_enroll: "/totp/enroll",
                  password_change: "/password"},
-        pubsub: MyApp.PubSub
+        pubsub: MyApp.PubSub,
+        endpoint: MyAppWeb.Endpoint
 
   and uses the plugs (`Macaw.Auth.Plug`) and LiveView hooks
   (`Macaw.Auth.Live`). Everything here is the same for every backend:
@@ -21,7 +22,12 @@ defmodule Macaw.Auth do
   - **Revocation reaches open pages.** Every revocation goes through
     `revoke/2`, which tells each open LiveView of the user's sessions, so a
     revoked page disconnects at once. Without `:pubsub` that is this node
-    (a `Registry`); with it, every node.
+    (a `Registry`); with it, every node. With `:endpoint` (the host's
+    Phoenix endpoint), it also broadcasts `"disconnect"` on each revoked
+    session's `live_socket_id/1`, which `Macaw.Auth.Plug.log_in/3` puts in
+    the session, so Phoenix drops those sockets too:
+
+        config :macaw_auth, endpoint: MyAppWeb.Endpoint
   - **The viewer.** `viewer/1` gives a Macaw page the viewer: identity and
     roles, never preferences.
   """
@@ -104,6 +110,13 @@ defmodule Macaw.Auth do
   @spec fetch_by_id(term(), keyword()) :: {:ok, User.t(), Session.t()} | {:error, atom()}
   def fetch_by_id(id, opts \\ []), do: backend().fetch_session_by_id(id, opts)
 
+  @doc """
+  How long a session may go unused before the backend expires it, in
+  seconds: the remember cookie's `max_age`.
+  """
+  @spec session_idle_seconds(keyword()) :: pos_integer()
+  def session_idle_seconds(opts \\ []), do: backend().session_idle_seconds(opts)
+
   @doc "A user's sessions, newest first."
   @spec list_sessions(term(), keyword()) :: [Session.t()]
   def list_sessions(user_id, opts \\ []), do: backend().list_sessions(user_id, opts)
@@ -154,12 +167,35 @@ defmodule Macaw.Auth do
   can also be revoked outside macaw_auth (an Ash token revoked through Ash,
   say) calls it from that path too, so open pages hear of every revocation,
   whoever made it. Announcing nothing is a no-op.
+
+  With `config :macaw_auth, endpoint: MyAppWeb.Endpoint`, it also
+  broadcasts `"disconnect"` on each session's `live_socket_id/1`, so
+  Phoenix closes those sessions' LiveView sockets as well. Without
+  `:endpoint` that broadcast is skipped; the hooks' guard
+  (`Macaw.Auth.Live`) still takes the open pages away.
   """
   @spec announce_revoked(term(), [term()]) :: :ok
   def announce_revoked(_user_id, []), do: :ok
 
-  def announce_revoked(user_id, ids) when is_list(ids),
-    do: broadcast(user_id, {:sessions_revoked, ids})
+  def announce_revoked(user_id, ids) when is_list(ids) do
+    :ok = broadcast(user_id, {:sessions_revoked, ids})
+    disconnect_sockets(Application.get_env(:macaw_auth, :endpoint), ids)
+  end
+
+  @doc """
+  The `live_socket_id` of session `session_id`,
+  `"macaw_auth_sessions:<session id>"`: `Macaw.Auth.Plug.log_in/3` puts it
+  in the session, so Phoenix names that session's LiveView sockets by it,
+  and a revocation broadcasts `"disconnect"` on it (`announce_revoked/2`).
+  """
+  @spec live_socket_id(term()) :: String.t()
+  def live_socket_id(session_id), do: "macaw_auth_sessions:#{session_id}"
+
+  defp disconnect_sockets(nil, _ids), do: :ok
+
+  defp disconnect_sockets(endpoint, ids) do
+    Enum.each(ids, &endpoint.broadcast(live_socket_id(&1), "disconnect", %{}))
+  end
 
   defp broadcast(user_id, message) do
     case Application.get_env(:macaw_auth, :pubsub) do

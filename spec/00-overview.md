@@ -14,7 +14,7 @@ Eight projects carried their own authentication, in three lineages, about 17,600
 A consumer needs only a narrow contract: who the current user is, plugs and hooks that guard requests and pages, and a session's lifecycle (sign in, sign out, list, revoke one or all, with the push to open pages). Everything else (storage, LDAP binding, TOTP sealing, the throttle, the hasher) is a backend's own, so the contract never forces a backend to reimplement the native feature set (macaw_compose#32, owner amendment of 2026-10-26).
 
 - **What is the same for every backend is `Macaw.Auth`'s:** the steps a session owes and their order, the configured paths, the revocation push, the viewer, and the plugs and hooks built on them ([01 §1](01-contract.md#auth-contract-facade)).
-- **What differs is the backend's:** who someone is, and their sessions, the eight callbacks of `Macaw.Auth.Backend` ([01 §2](01-contract.md#auth-backend)).
+- **What differs is the backend's:** who someone is, and their sessions, the nine callbacks of `Macaw.Auth.Backend` ([01 §2](01-contract.md#auth-backend)).
 - **The backend is the developer's build-time choice,** `config :macaw_auth, backend: Macaw.Auth.Native` ([01 §1.1](01-contract.md#auth-backend-config)).
 - **Two backends exist:** `Macaw.Auth.Native`, in this library, and `Macaw.Auth.Ash`, over AshAuthentication, in its own library, [macaw_auth_ash](https://gitlab.conet.yarina.org/dco-tek/macaw_auth_ash/-/blob/main/spec/00-overview.md#ash-overview), so `macaw_auth` never depends on Ash. The kit runs against both.
 
@@ -53,7 +53,8 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 - **an anonymous directory search** needs `allow_anonymous_search: true` ([07 §1.2](07-native-ldap.md#auth-ldap-finding));
 - **a directory user never takes over a row another source owns** ([06 §4](06-native-sources.md#auth-provision));
 - **there is no registration:** a local user is made by the host (`Macaw.Auth.Native.create_user/1`), a directory user only by signing in;
-- **a role check passes only on membership,** and what a role allows is the app's ([02 §4](02-plugs.md#auth-plug-require-role)).
+- **a role check passes only on membership,** and what a role allows is the app's ([02 §4](02-plugs.md#auth-plug-require-role));
+- **the remember cookie is `secure` under https,** with no setting to turn it off, and is set only when a sign-in asks for it ([02 §10](02-plugs.md#auth-plug-remember)).
 
 ## 6. Known gaps {#auth-gaps}
 
@@ -65,7 +66,7 @@ Found while writing this spec from the code (v0.1.1); each section states what t
 - **An open page's re-check doesn't re-apply its guard.** `Macaw.Auth.Live`'s re-check refreshes the user and session, but checks neither the role a `{:require_role, roles}` page mounted with nor a newly owed step: a page mounted as `admin` stays open after the role is removed, until it is reloaded. Its moduledoc says a role change "shows at once" ([03 §4](03-live.md#auth-live-recheck)). Shown with the memory backend: the re-check after the role's removal leaves `redirected` nil.
 
 **Gaps against the proposal (macaw_compose#32, #51):**
-- **Not implemented:** the signed remember cookie; the `secure` cookie flag under https (the session cookie is the host's endpoint configuration); `live_socket_id` on sign-in; first-admin bootstrap and a `mix macaw_auth.user` task; the `authorize/3` callback; warnings at boot on `verify_peer: false` and on a no-authentication mode; a `Store` behavior (the native backend is Ecto only).
+- **Not implemented:** first-admin bootstrap and a `mix macaw_auth.user` task; the `authorize/3` callback; warnings at boot on `verify_peer: false` and on a no-authentication mode; a `Store` behavior (the native backend is Ecto only).
 - **The backend has no default.** The proposal made native the default backend; `Macaw.Auth.backend/0` raises when `:backend` is unset ([01 §1.1](01-contract.md#auth-backend-config)).
 - **The kit checks less than proposed.** It checks replay and revocation, but not timing parity, escaping or the throttle, which are the native backend's own tests; `Macaw.Auth.Backend`'s moduledoc says the kit checks that an unknown user and a wrong password take the same time, and it doesn't ([04 §2](04-conformance.md#auth-kit-checks)).
 - **A completed step is the host's word.** `Macaw.Auth.complete_step/3` marks `:second_factor` or `:second_factor_enroll` passed without a code or an enrollment: the second factor's page must go through `Macaw.Auth.Plug.verify_second_factor/2`, and enrollment's must call it only after `Macaw.Auth.Native.enroll_confirm/3` succeeded ([01 §4](01-contract.md#auth-steps)).

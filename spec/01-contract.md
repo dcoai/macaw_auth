@@ -12,6 +12,7 @@ What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Maca
 | `Macaw.Auth.create_session/2` | `create_session/2` (§5) | `{:ok, token, session}` |
 | `Macaw.Auth.fetch/2` | `fetch_session/2` | `{:ok, user, session}` or `{:error, reason}` |
 | `Macaw.Auth.fetch_by_id/2` | `fetch_session_by_id/2` | `{:ok, user, session}` or `{:error, reason}` |
+| `Macaw.Auth.session_idle_seconds/1` | `session_idle_seconds/1` (§2.8) | the idle limit, in seconds |
 | `Macaw.Auth.list_sessions/2` | `list_sessions/2` | the user's sessions, newest first |
 | `Macaw.Auth.complete_step/3` | `complete_step/3` | `:ok` |
 | `Macaw.Auth.verify_second_factor/3` | `verify_second_factor/3` | `:ok` or `{:error, reason}` |
@@ -89,6 +90,14 @@ for each backend: a wrong password and an unknown username give the same {:error
 
 `verify_second_factor(session_id, code, opts)` checks a second-factor code (a TOTP code or a recovery code) for the session's user and, on success, completes the session's `:second_factor` step. **A code is accepted once:** the same code again is refused. A backend throttles these attempts as it does sign-ins. `:ok`, or `{:error, :invalid_code | :throttled}`, or the session's own refusal (`:invalid | :expired | :disabled`). Options: `:remote_ip`, `:now`. A backend without a second factor refuses every code (the Ash backend's `{:error, :unsupported}`).
 
+### 2.8 session_idle_seconds/1 {#auth-backend-idle}
+
+`session_idle_seconds(opts)` gives **the idle limit `fetch_session/2` expires sessions by,** in seconds, a positive integer: a session unused longer than this is `:expired` (§2.3). It is what the remember cookie's `max_age` is ([02 §10](02-plugs.md#auth-plug-remember)), so a remembered browser keeps its cookie exactly as long as an unused session lives. The native backend's is `session_idle_days` × 86 400 ([09 §3](09-native-sessions.md#auth-sessions-touch)); the in-memory test backend's is its fixed 3 600. Added in v0.2.0: a backend written for v0.1 must add it, and the kit checks it agrees with the fixtures' `idle_seconds/0` ([04 §2](04-conformance.md#auth-kit-checks)).
+
+```test:backend-idle-seconds
+Macaw.Auth.session_idle_seconds/0 with the native backend is 14 × 86 400 by default and 86 400 with session_idle_days 1; with the memory backend, 3 600; for each backend, it equals the fixtures' idle_seconds/0
+```
+
 ## 3. Paths {#auth-paths}
 
 `Macaw.Auth.path/1` gives a configured path, `config :macaw_auth, paths: %{name => path}`, else its default:
@@ -153,6 +162,8 @@ a user with second_factor :enrolled gets a session whose pending step is :second
 - **without it, this node:** a subscriber registers in `Macaw.Auth.Registry` under the topic, and an announcement is dispatched to every registered process on this node;
 - **with it, every node:** `Phoenix.PubSub.subscribe/2` and `Phoenix.PubSub.broadcast/3` on the host's PubSub, so a page on another node hears a revocation made here.
 
+**Sockets by `live_socket_id`.** `Macaw.Auth.live_socket_id/1` gives a session's socket id, **`"macaw_auth_sessions:<session id>"`**, which `Macaw.Auth.Plug.log_in/3` puts in the session as `:live_socket_id` ([02 §7](02-plugs.md#auth-plug-log-in)), so Phoenix names that session's LiveView sockets by it. When **`config :macaw_auth, endpoint: MyAppWeb.Endpoint`** is set, `announce_revoked/2` (and so `revoke/2`) also calls **`endpoint.broadcast(live_socket_id(id), "disconnect", %{})` for each id announced**, after telling the subscribers, and Phoenix closes those sockets, whatever page they hold. **Without `:endpoint`, nothing more is sent:** the subscribers' guard ([03 §3](03-live.md#auth-live-revoked)) still takes the open pages away. Announcing `[]` broadcasts nothing either way. Both are as phx.gen.auth does it (exio, Snow); the guard reaches pages, the disconnect reaches every socket of the session.
+
 A session ended by expiry, or because its user was disabled, is not announced: its open pages find it gone at their next re-check ([03 §4](03-live.md#auth-live-recheck)).
 
 ```test:revoke-announces
@@ -161,6 +172,14 @@ a process subscribed to a user's sessions receives {:sessions_revoked, [id]} whe
 
 ```test:announce-revoked
 announce_revoked(user, [:a, :b]) reaches that user's subscriber as {:sessions_revoked, [:a, :b]}; announce_revoked(user, []) sends nothing; a subscriber of another user receives nothing
+```
+
+```test:revoke-disconnects-sockets
+with :endpoint set to an endpoint that records broadcasts, revoke({:user, id}, except: kept) of two sessions broadcasts {"macaw_auth_sessions:<id>", "disconnect", %{}} for each ended session and nothing for the kept one; announce_revoked(user, [:a, :b]) broadcasts on live_socket_id(:a) and live_socket_id(:b), announce_revoked(user, []) nothing; without :endpoint nothing is broadcast
+```
+
+```test:live-socket-id
+live_socket_id(42) is "macaw_auth_sessions:42"
 ```
 
 ```test:revocation-pubsub

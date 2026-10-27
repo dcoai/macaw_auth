@@ -22,9 +22,27 @@ defmodule Macaw.Auth.PlugTest do
     :ok
   end
 
+  @secret_key_base String.duplicate("macaw_auth test secret key base ", 2)
+
   defp request(path, session \\ %{}, method \\ :get) do
-    conn(method, path) |> init_test_session(session) |> AuthPlug.fetch_current_user([])
+    conn(method, path) |> with_secret() |> init_test_session(session) |> fetch()
   end
+
+  defp with_secret(conn), do: %{conn | secret_key_base: @secret_key_base}
+
+  defp fetch(conn), do: AuthPlug.fetch_current_user(conn, [])
+
+  # A later request from the browser that got `previous`: its cookies, a
+  # fresh session (the browser closed, say).
+  defp next_request(previous, path, session \\ %{}) do
+    conn(:get, path)
+    |> with_secret()
+    |> recycle_cookies(previous)
+    |> init_test_session(session)
+    |> fetch()
+  end
+
+  @remember "_macaw_auth_remember"
 
   defp signed_in(user, path) do
     {:ok, token, _} = Auth.create_session(user)
@@ -167,6 +185,188 @@ defmodule Macaw.Auth.PlugTest do
     assert Auth.fetch(token) == {:error, :invalid}
     assert_receive {:sessions_revoked, [id]}
     assert id == session.id
+  end
+
+  describe "the remember cookie" do
+    test "log_in with remember: true sets a signed cookie for the idle limit, http only, Lax" do
+      {user, _} = Mem.user!(%{})
+      conn = request("/login") |> AuthPlug.log_in(user, remember: true)
+
+      cookie = conn.resp_cookies[@remember]
+      assert cookie.max_age == Mem.idle_seconds()
+      assert cookie.http_only == true
+      assert cookie.same_site == "Lax"
+      assert cookie.secure == false
+      # Signed with the secret key base, holding the session's token.
+      token = get_session(conn, AuthPlug.token_key())
+
+      assert {:ok, ^token} =
+               Plug.Crypto.verify(@secret_key_base, @remember <> "_cookie", cookie.value)
+    end
+
+    test "the cookie is secure exactly when the request is https" do
+      {user, _} = Mem.user!(%{})
+
+      conn =
+        %{conn(:get, "/login") | scheme: :https}
+        |> with_secret()
+        |> init_test_session(%{})
+        |> fetch()
+        |> AuthPlug.log_in(user, remember: true)
+
+      assert conn.resp_cookies[@remember].secure == true
+    end
+
+    test "without remember: true no live cookie is set, and an old one is deleted" do
+      {user, _} = Mem.user!(%{})
+      remembered = request("/login") |> AuthPlug.log_in(user, remember: true)
+
+      conn =
+        conn(:get, "/login")
+        |> with_secret()
+        |> recycle_cookies(remembered)
+        |> init_test_session(%{})
+        |> fetch()
+        |> AuthPlug.log_in(user)
+
+      assert conn.resp_cookies[@remember].max_age == 0
+      plain = request("/login") |> AuthPlug.log_in(user)
+      refute match?(%{max_age: age} when age > 0, plain.resp_cookies[@remember])
+    end
+
+    test "a session with no token is restored from the cookie, its token put back" do
+      {user, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(user, remember: true)
+      token = get_session(signed_in, AuthPlug.token_key())
+      session = signed_in.assigns.current_session
+
+      conn = next_request(signed_in, "/reports")
+
+      assert conn.assigns.current_user.id == user.id
+      assert conn.assigns.current_session.id == session.id
+      assert get_session(conn, AuthPlug.token_key()) == token
+      assert get_session(conn, :live_socket_id) == "macaw_auth_sessions:#{session.id}"
+    end
+
+    test "a touch of a remembered session sets the cookie again, for a fresh idle limit" do
+      {user, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(user, remember: true)
+      token = get_session(signed_in, AuthPlug.token_key())
+      :ok = Mem.age_session!(signed_in.assigns.current_session.id, 400)
+
+      conn = next_request(signed_in, "/reports", %{AuthPlug.token_key() => token})
+
+      assert conn.assigns.current_user.id == user.id
+      cookie = conn.resp_cookies[@remember]
+      assert cookie.max_age == Mem.idle_seconds()
+      assert cookie.http_only == true and cookie.same_site == "Lax" and cookie.secure == false
+
+      assert {:ok, ^token} =
+               Plug.Crypto.verify(@secret_key_base, @remember <> "_cookie", cookie.value)
+    end
+
+    test "a request that records no use leaves the cookie alone" do
+      {user, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(user, remember: true)
+      token = get_session(signed_in, AuthPlug.token_key())
+
+      conn = next_request(signed_in, "/reports", %{AuthPlug.token_key() => token})
+
+      assert conn.assigns.current_user.id == user.id
+      refute Map.has_key?(conn.resp_cookies, @remember)
+    end
+
+    test "a touch never sets a cookie for a browser that didn't opt in" do
+      {user, _} = Mem.user!(%{})
+      {:ok, token, session} = Auth.create_session(user)
+      :ok = Mem.age_session!(session.id, 400)
+
+      conn = request("/reports", %{AuthPlug.token_key() => token})
+
+      assert conn.assigns.current_user.id == user.id
+      refute Map.has_key?(conn.resp_cookies, @remember)
+    end
+
+    test "a touch doesn't refresh a cookie holding another session's token" do
+      {remembered, _} = Mem.user!(%{})
+      {other, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(remembered, remember: true)
+      {:ok, other_token, other_session} = Auth.create_session(other)
+      :ok = Mem.age_session!(other_session.id, 400)
+
+      conn = next_request(signed_in, "/reports", %{AuthPlug.token_key() => other_token})
+
+      assert conn.assigns.current_user.id == other.id
+      refute Map.has_key?(conn.resp_cookies, @remember)
+    end
+
+    test "the cookie is read only when the session has no token" do
+      {remembered, _} = Mem.user!(%{})
+      {other, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(remembered, remember: true)
+      {:ok, other_token, _} = Auth.create_session(other)
+
+      conn = next_request(signed_in, "/reports", %{AuthPlug.token_key() => other_token})
+      assert conn.assigns.current_user.id == other.id
+    end
+
+    test "a revoked session's cookie is dead, and deleted" do
+      {user, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(user, remember: true)
+      :ok = Auth.revoke(signed_in.assigns.current_session.id)
+
+      conn = next_request(signed_in, "/reports")
+      assert conn.assigns.current_user == nil
+      assert get_session(conn, AuthPlug.token_key()) == nil
+      assert conn.resp_cookies[@remember].max_age == 0
+    end
+
+    test "a cookie not signed with the key is ignored" do
+      {user, _} = Mem.user!(%{})
+      {:ok, token, _} = Auth.create_session(user)
+
+      conn =
+        conn(:get, "/reports")
+        |> with_secret()
+        |> put_req_cookie(@remember, Base.url_encode64(token))
+        |> init_test_session(%{})
+        |> fetch()
+
+      assert conn.assigns.current_user == nil
+    end
+
+    test "log_out deletes the cookie" do
+      {user, _} = Mem.user!(%{})
+      signed_in = request("/login") |> AuthPlug.log_in(user, remember: true)
+
+      conn = next_request(signed_in, "/logout") |> AuthPlug.log_out()
+      assert conn.resp_cookies[@remember].max_age == 0
+      assert Auth.fetch(get_session(signed_in, AuthPlug.token_key())) == {:error, :invalid}
+    end
+
+    test "the cookie's name is configurable" do
+      Application.put_env(:macaw_auth, :remember_cookie, "_my_app_remember")
+      on_exit(fn -> Application.delete_env(:macaw_auth, :remember_cookie) end)
+      {user, _} = Mem.user!(%{})
+
+      signed_in = request("/login") |> AuthPlug.log_in(user, remember: true)
+      assert AuthPlug.remember_cookie() == "_my_app_remember"
+      assert Map.has_key?(signed_in.resp_cookies, "_my_app_remember")
+      refute Map.has_key?(signed_in.resp_cookies, @remember)
+      assert next_request(signed_in, "/reports").assigns.current_user.id == user.id
+    end
+
+    test "the default name" do
+      assert AuthPlug.remember_cookie() == "_macaw_auth_remember"
+    end
+  end
+
+  test "log_in puts the session's live_socket_id" do
+    {user, _} = Mem.user!(%{})
+    conn = request("/login") |> AuthPlug.log_in(user)
+    id = conn.assigns.current_session.id
+    assert get_session(conn, :live_socket_id) == "macaw_auth_sessions:#{id}"
+    assert get_session(conn, "live_socket_id") == "macaw_auth_sessions:#{id}"
   end
 
   # Phoenix's redirect raises on each of these; the guard in front of it

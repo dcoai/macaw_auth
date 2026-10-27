@@ -34,7 +34,11 @@ config :macaw_auth, Macaw.Auth.Native,
 ```
 
 ```elixir
-config :macaw_auth, backend: Macaw.Auth.Native, pubsub: MyApp.PubSub
+config :macaw_auth,
+  backend: Macaw.Auth.Native,
+  pubsub: MyApp.PubSub,
+  endpoint: MyAppWeb.Endpoint,            # revocation also disconnects LiveView sockets
+  remember_cookie: "_my_app_remember"     # optional; default "_macaw_auth_remember"
 
 import Macaw.Auth.Plug
 plug :fetch_session
@@ -42,5 +46,9 @@ plug :fetch_flash
 plug Macaw.Plug.ClientIp, trusted_proxies: [...]
 plug :fetch_current_user
 ```
+
+**Remember me.** `Macaw.Auth.Plug.log_in(conn, user, remember: true)` also sets a signed cookie holding the session's token, for the backend's idle limit (`Macaw.Auth.session_idle_seconds/1`), `http_only`, `same_site: "Lax"`, and `secure` whenever the request is https (no setting turns that off). `fetch_current_user/2` reads it only when the session has no token, and sets it again whenever the backend records the session's use, so a browser in use keeps it; a revoked session's cookie no longer resolves, and `log_out/1` deletes it. The session cookie itself is the host's endpoint's: set `secure: true` in its `Plug.Session` options on an https site.
+
+**LiveView sockets.** `log_in/3` puts `live_socket_id` (`"macaw_auth_sessions:<session id>"`) in the session. With `:endpoint` configured, every revocation (`Macaw.Auth.revoke/2`, sign-out) broadcasts `"disconnect"` on it, so Phoenix drops the session's sockets; without it, the hooks' own guard still takes revoked pages away.
 
 Part of [Macaw](https://gitlab.conet.yarina.org/dco-tek/macaw_compose) (spec/00 §4, host libraries). Released by git tag.

@@ -57,6 +57,8 @@ A static (disconnected) render does none of this: it has no process that lives.
 
 `handle_guard({:sessions_revoked, ids}, socket)`: when **the page's own session id is among `ids`**, the page halts the message and redirects to `path(:sign_in)`; when it is not (another of the user's sessions ended), the message is consumed and the page stays. Either way it never reaches the page's `handle_info/2`.
 
+This guard needs nothing of the host. With `config :macaw_auth, endpoint:` set, a revocation also broadcasts `"disconnect"` on the session's `live_socket_id`, which Phoenix answers by closing every socket of that session, guarded page or not ([01 §6](01-contract.md#auth-revocation)); the two are independent, and either alone takes a revoked page away.
+
 ```test:live-revoked
 handle_guard({:sessions_revoked, [own_id]}, socket) redirects to "/login"; handle_guard({:sessions_revoked, [other_id]}, socket) halts with redirected nil
 ```

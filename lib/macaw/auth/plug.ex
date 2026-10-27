@@ -29,6 +29,28 @@ defmodule Macaw.Auth.Plug do
   throttle counts, the client's address, not a proxy's. Run `fetch_flash`
   before `require_role/2`, or its refusal goes home without saying why.
 
+  **Remembering a browser.** `log_in(conn, user, remember: true)` (a
+  "remember me" box) also sets a signed cookie holding the session's token
+  (`remember_cookie/0`, `config :macaw_auth, remember_cookie:`), which
+  `fetch_current_user/2` reads when the session has none, after the
+  browser closed. It lives for the backend's idle limit, set again each
+  time the backend records the session's use, is `http_only`
+  and `same_site: "Lax"`, and is `secure` exactly when the request is
+  https; no setting turns that off. It dies with its session: a revoked
+  or expired session's token no longer resolves, and `log_out/1` deletes
+  it. Behind a TLS-terminating proxy, make the request's scheme the
+  client's (`Plug.RewriteOn` with `:x_forwarded_proto`), or the cookie goes
+  out without `secure`. The session cookie is the host's (its endpoint's
+  `Plug.Session` options); set `secure: true` there for an https site, as
+  this cookie does by itself.
+
+  **LiveView sockets.** `log_in/3` puts the session's `live_socket_id`
+  (`Macaw.Auth.live_socket_id/1`) in the session, so Phoenix names the
+  session's LiveView sockets by it. With `config :macaw_auth, endpoint:
+  MyAppWeb.Endpoint`, every revocation (`Macaw.Auth.revoke/2`, `log_out/1`)
+  broadcasts `"disconnect"` on it and Phoenix drops those sockets; without
+  `:endpoint` the hooks' own guard (`Macaw.Auth.Live`) takes the pages away.
+
   Redirects are `Phoenix.Controller.redirect/2`'s, behind this module's own
   check that the target is a path on this site (`site_path?/1`). A
   remembered path came from a request, and Phoenix raises on one that
@@ -41,24 +63,93 @@ defmodule Macaw.Auth.Plug do
   alias Macaw.Auth
 
   @token_key "macaw_auth_token"
+  @remember_cookie "_macaw_auth_remember"
   @return_key "macaw_auth_return_to"
 
-  @doc "Assigns the signed-in user, session and pending step, or nils."
-  def fetch_current_user(conn, _opts) do
-    case Auth.fetch(get_session(conn, @token_key), touch: true) do
-      {:ok, user, session} ->
-        conn
-        |> assign(:current_user, user)
-        |> assign(:current_session, session)
-        |> assign(:pending_step, Auth.pending_step(user, session))
+  @doc """
+  Assigns the signed-in user, session and pending step, or nils.
 
-      {:error, _} ->
+  The token is the session's; only when the session has none is it read
+  from the remember cookie, and then, if it resolves, put back into the
+  session (renewed, with the session's `live_socket_id`) and the cookie
+  re-issued for another idle limit. A refused token is deleted from the
+  session, and a refused remembered one from the cookie too.
+
+  When the backend records the session's use on this request (its touch,
+  at most its interval), a remember cookie the browser sent for this
+  session is set again too, for a fresh idle limit: a browser kept open
+  past the idle limit keeps its cookie as long as its session lives. A
+  browser that sent none never gets one here.
+  """
+  def fetch_current_user(conn, _opts) do
+    {conn, token, source} = token(conn)
+    now = DateTime.utc_now()
+
+    case {Auth.fetch(token, touch: true, now: now), source} do
+      {{:ok, user, session}, :session} ->
         conn
-        |> delete_session(@token_key)
-        |> assign(:current_user, nil)
-        |> assign(:current_session, nil)
-        |> assign(:pending_step, nil)
+        |> refresh_remember_cookie(token, touched?(session, now))
+        |> signed_in(user, session)
+
+      {{:ok, user, session}, :cookie} ->
+        conn
+        |> configure_session(renew: true)
+        |> put_session(@token_key, token)
+        |> put_session(:live_socket_id, Auth.live_socket_id(session.id))
+        |> put_remember_cookie(token)
+        |> signed_in(user, session)
+
+      {{:error, _}, :cookie} ->
+        conn |> delete_remember_cookie() |> signed_out()
+
+      {{:error, _}, _none_or_session} ->
+        conn |> delete_session(@token_key) |> signed_out()
     end
+  end
+
+  defp token(conn) do
+    case get_session(conn, @token_key) do
+      nil ->
+        conn = fetch_cookies(conn, signed: [remember_cookie()])
+
+        case conn.cookies[remember_cookie()] do
+          token when is_binary(token) -> {conn, token, :cookie}
+          _ -> {conn, nil, :none}
+        end
+
+      token ->
+        {conn, token, :session}
+    end
+  end
+
+  # The backend touched the session on this request: its last use is the
+  # clock this request gave it (every backend honors `:now`).
+  defp touched?(%{last_used_at: %DateTime{} = used}, now), do: DateTime.compare(used, now) == :eq
+  defp touched?(_session, _now), do: false
+
+  # Only a browser that opted in, and only for this session's own token.
+  defp refresh_remember_cookie(conn, token, true = _touched) do
+    conn = fetch_cookies(conn, signed: [remember_cookie()])
+
+    if conn.cookies[remember_cookie()] == token,
+      do: put_remember_cookie(conn, token),
+      else: conn
+  end
+
+  defp refresh_remember_cookie(conn, _token, false), do: conn
+
+  defp signed_in(conn, user, session) do
+    conn
+    |> assign(:current_user, user)
+    |> assign(:current_session, session)
+    |> assign(:pending_step, Auth.pending_step(user, session))
+  end
+
+  defp signed_out(conn) do
+    conn
+    |> assign(:current_user, nil)
+    |> assign(:current_session, nil)
+    |> assign(:pending_step, nil)
   end
 
   @doc """
@@ -118,10 +209,21 @@ defmodule Macaw.Auth.Plug do
 
   @doc """
   Starts a session for a user who passed `Macaw.Auth.authenticate/2`: the
-  old session is renewed (no fixation), the token stored, and the browser
-  sent to the step the session owes, else where it was going, else home.
+  old session is renewed (no fixation), the token stored with the
+  session's `live_socket_id` (`Macaw.Auth.live_socket_id/1`), and the
+  browser sent to the step the session owes, else where it was going,
+  else home.
+
+  `remember: true` also sets the remember cookie (`remember_cookie/0`):
+  signed, holding the token, for the backend's idle limit
+  (`Macaw.Auth.session_idle_seconds/1`), `http_only`, `same_site: "Lax"`,
+  and `secure` exactly when the request is https. Without it, a remember
+  cookie the browser sent is deleted. Other `opts` go to
+  `Macaw.Auth.create_session/2`.
   """
   def log_in(conn, user, opts \\ []) do
+    {remember, opts} = Keyword.pop(opts, :remember, false)
+
     {:ok, token, session} =
       Auth.create_session(
         user,
@@ -140,12 +242,50 @@ defmodule Macaw.Auth.Plug do
     |> configure_session(renew: true)
     |> clear_session()
     |> put_session(@token_key, token)
+    |> put_session(:live_socket_id, Auth.live_socket_id(session.id))
     |> then(&if(return_to, do: put_session(&1, @return_key, return_to), else: &1))
-    |> assign(:current_user, user)
-    |> assign(:current_session, session)
-    |> assign(:pending_step, Auth.pending_step(user, session))
+    |> remember(remember, token)
+    |> signed_in(user, session)
     |> continue()
   end
+
+  defp remember(conn, true, token), do: put_remember_cookie(conn, token)
+  defp remember(conn, false, _token), do: forget(conn)
+
+  # Deletes the remember cookie only when the browser sent one.
+  defp forget(conn) do
+    conn = fetch_cookies(conn)
+
+    if Map.has_key?(conn.req_cookies, remember_cookie()),
+      do: delete_remember_cookie(conn),
+      else: conn
+  end
+
+  defp put_remember_cookie(conn, token) do
+    put_resp_cookie(conn, remember_cookie(), token,
+      sign: true,
+      max_age: Auth.session_idle_seconds(),
+      http_only: true,
+      same_site: "Lax",
+      secure: conn.scheme == :https
+    )
+  end
+
+  defp delete_remember_cookie(conn) do
+    delete_resp_cookie(conn, remember_cookie(),
+      sign: true,
+      http_only: true,
+      same_site: "Lax",
+      secure: conn.scheme == :https
+    )
+  end
+
+  @doc """
+  The remember cookie's name: `config :macaw_auth, remember_cookie:`,
+  default `"_macaw_auth_remember"`.
+  """
+  @spec remember_cookie() :: String.t()
+  def remember_cookie, do: Application.get_env(:macaw_auth, :remember_cookie, @remember_cookie)
 
   @doc """
   Records a step the current session completed and sends it on: to the next
@@ -199,13 +339,18 @@ defmodule Macaw.Auth.Plug do
     end
   end
 
-  @doc "Revokes the session (telling its open pages), renews the cookie, and goes to sign in."
+  @doc """
+  Revokes the session (telling its open pages, and with `:endpoint`
+  disconnecting its LiveView sockets), renews the session, deletes the
+  remember cookie, and goes to sign in.
+  """
   def log_out(conn) do
     if session = conn.assigns[:current_session], do: Auth.revoke(session.id)
 
     conn
     |> configure_session(renew: true)
     |> clear_session()
+    |> forget()
     |> redirect(Auth.path(:sign_in))
   end
 

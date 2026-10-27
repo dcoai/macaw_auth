@@ -151,6 +151,11 @@ defmodule Macaw.Auth.Native do
   @impl Macaw.Auth.Backend
   defdelegate fetch_session_by_id(id, opts), to: Sessions, as: :fetch_by_id
 
+  @doc "The idle limit, `session_idle_days` in seconds."
+  @impl Macaw.Auth.Backend
+  @spec session_idle_seconds(keyword()) :: pos_integer()
+  def session_idle_seconds(_opts), do: Config.get().session_idle_days * 86_400
+
   @impl Macaw.Auth.Backend
   defdelegate list_sessions(user_id, opts), to: Sessions, as: :list
 

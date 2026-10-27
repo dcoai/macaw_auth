@@ -74,6 +74,16 @@ defmodule Macaw.Auth.Test.MemoryBackend do
   @impl Macaw.Auth.Conformance.Fixtures
   def idle_seconds, do: @idle
 
+  @doc """
+  Moves session `id`'s last use `seconds` into the past, as if it had sat
+  unused that long: a request on the real clock then finds a touch due.
+  """
+  def age_session!(id, seconds) do
+    {h, s} = Enum.find(:ets.tab2list(@sessions), fn {_, s} -> s.id == id end)
+    :ets.insert(@sessions, {h, %{s | last_used_at: DateTime.add(s.last_used_at, -seconds)}})
+    :ok
+  end
+
   @impl Macaw.Auth.Conformance.Fixtures
   def stored_session_values,
     do: for({hash, _session} <- :ets.tab2list(@sessions), do: hash)
@@ -158,6 +168,9 @@ defmodule Macaw.Auth.Test.MemoryBackend do
         {:ok, user, session}
     end
   end
+
+  @impl Macaw.Auth.Backend
+  def session_idle_seconds(_opts), do: @idle
 
   @impl Macaw.Auth.Backend
   def list_sessions(user_id, _opts) do

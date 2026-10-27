@@ -47,6 +47,13 @@ defmodule Macaw.Auth.Backend do
   @callback fetch_session_by_id(term(), opts()) ::
               {:ok, User.t(), Session.t()} | {:error, :invalid | :expired | :disabled}
 
+  @doc """
+  How long a session may go unused before it expires, in seconds: the
+  idle limit `fetch_session/2` expires sessions by. The remember cookie
+  lives this long (`Macaw.Auth.Plug.log_in/3`).
+  """
+  @callback session_idle_seconds(opts()) :: pos_integer()
+
   @doc "A user's sessions, newest first."
   @callback list_sessions(term(), opts()) :: [Session.t()]
 

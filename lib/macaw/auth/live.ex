@@ -15,6 +15,10 @@ defmodule Macaw.Auth.Live do
   session is revoked, and re-checks its session every `:revalidate_ms`
   (default 60 s) without extending it, which also refreshes the user, so a
   role change shows at once.
+
+  With `config :macaw_auth, endpoint: MyAppWeb.Endpoint`, a revocation
+  also has Phoenix drop the session's sockets, by the `live_socket_id`
+  `Macaw.Auth.Plug.log_in/3` put in the session (`Macaw.Auth.announce_revoked/2`).
   """
 
   import Phoenix.Component, only: [assign: 2]

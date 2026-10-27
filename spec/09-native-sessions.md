@@ -1,6 +1,6 @@
 # 09 — Native: sessions {#auth-sessions}
 
-`Macaw.Auth.Native.Sessions` keeps the native backend's sessions in `macaw_auth_sessions` (`Macaw.Auth.Native.SessionRecord`), ported from exio's `Accounts.Sessions`. It implements the backend's session callbacks ([01 §2](01-contract.md#auth-backend)) as `create/2`, `fetch/2`, `fetch_by_id/2`, `list/2`, `revoke/2` and `complete_step/3`. **Every function honors `:now`** (a `DateTime`), kept at microsecond precision as the columns hold it.
+`Macaw.Auth.Native.Sessions` keeps the native backend's sessions in `macaw_auth_sessions` (`Macaw.Auth.Native.SessionRecord`), ported from exio's `Accounts.Sessions`. It implements the backend's session callbacks ([01 §2](01-contract.md#auth-backend)) as `create/2`, `fetch/2`, `fetch_by_id/2`, `list/2`, `revoke/2` and `complete_step/3`; `Macaw.Auth.Native.session_idle_seconds/1` reports its idle limit (§3). **Every function honors `:now`** (a `DateTime`), kept at microsecond precision as the columns hold it.
 
 ## 1. The token is never stored {#auth-sessions-token}
 
@@ -53,6 +53,12 @@ a session made at t0 is valid at t0 + 14 days (touch: false) and {:error, :expir
 
 ```test:sessions-idle-configured
 with session_idle_days 1, a session is valid at 86 400 s and :expired at 86 401 s
+```
+
+**The idle limit is reported.** `Macaw.Auth.Native.session_idle_seconds/1`, the backend's `session_idle_seconds/1` ([01 §2.8](01-contract.md#auth-backend-idle)), is **`session_idle_days` × 86 400**, read from the configuration at each call: exactly the limit above, and the remember cookie's `max_age` ([02 §10.1](02-plugs.md#auth-plug-remember-cookie)). A remembered session in use keeps its cookie: each hourly touch, and each request restored from the cookie, sets it again for another idle limit ([02 §10.2](02-plugs.md#auth-plug-remember-read)).
+
+```test:sessions-idle-seconds
+Macaw.Auth.Native.session_idle_seconds([]) and Macaw.Auth.session_idle_seconds() are 1 209 600 with the default configuration; with session_idle_days 1, 86 400
 ```
 
 ```test:sessions-touch-hourly
