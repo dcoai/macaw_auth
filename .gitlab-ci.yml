@@ -56,6 +56,14 @@ spelling:
   script:
     - elixir ci/spelling.exs
 
+# Every spec link resolves (ci/spec_links.exs): links into another Macaw
+# repository's spec are checked by shape here, where no sibling checkout exists.
+spec-links:
+  image: $ELIXIR_IMAGE
+  stage: check
+  script:
+    - elixir ci/spec_links.exs
+
 test:
   extends: .elixir
   stage: test
