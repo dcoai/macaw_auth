@@ -79,3 +79,11 @@ test:
     # Spec, tests and code aligned (macaw_compose spec/00 §4.1): the status reads this
     # job's test run as evidence, so it runs right after it, in the same job.
     - mix surfex.status
+
+# The throttle's model (spec/10 §7): `mix auth.verify` runs `mix extla.check` on
+# every model.
+models:
+  extends: .elixir
+  stage: test
+  script:
+    - mix auth.verify

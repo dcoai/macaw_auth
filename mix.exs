@@ -11,6 +11,7 @@ defmodule Macaw.Auth.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
+      aliases: ["auth.verify": &verify_models/1],
       description:
         "Authentication for Phoenix hosts: a narrow contract with a native backend " <>
           "(passwords, LDAP, hashed sessions, throttling, TOTP).",
@@ -26,7 +27,10 @@ defmodule Macaw.Auth.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  # `specs/` holds the extla models (spec/10 §7), dev and test only, so a host
+  # never compiles them.
+  defp elixirc_paths(:test), do: ["lib", "specs", "test/support"]
+  defp elixirc_paths(:dev), do: ["lib", "specs"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
@@ -50,7 +54,16 @@ defmodule Macaw.Auth.MixProject do
       {:ecto_sqlite3, "~> 0.17", only: :test},
       {:stream_data, "~> 1.1", only: :test},
       # Spec, tests and code kept aligned (macaw_compose spec/00 §4.1); dev/test only.
-      {:surfex, "~> 0.10.0", only: [:dev, :test], runtime: false}
+      {:surfex, "~> 0.10.0", only: [:dev, :test], runtime: false},
+      # `mix auth.verify` (spec/10 §7): the model of the throttle, from Hex.
+      # `only:` is load-bearing: dev and test deps are not transitive, so nothing
+      # here reaches a host.
+      {:extla, "~> 0.6.0", only: [:dev, :test], runtime: false}
     ]
   end
+
+  # Every model, checked one at a time. `Mix.Task.rerun/2`, not a list alias: Mix
+  # remembers a task by name and silently skips it the second time.
+  @models ~w(Macaw.Auth.Specs.Throttle)
+  defp verify_models(_args), do: Enum.each(@models, &Mix.Task.rerun("extla.check", [&1]))
 end

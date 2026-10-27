@@ -108,7 +108,7 @@ at bcrypt cost 9, the medians of nine blocked and nine checked attempts are with
 
 The counts live in a named, public ETS table, `Macaw.Auth.Native.Throttle`, owned by the throttle's process, which the `macaw_auth` application starts ([00 §3](00-overview.md#auth-dependencies)). A row is `{key, failures, last_failure_ms}`. **A failure updates it in one atomic step:** one `:ets.update_counter/4` call adds one to the count and sets the time to the later of the row's and the failure's own (operations on the time: minus one, raised to `now - 1` if below it, plus one). So concurrent failures each count, and the row holds the latest failure's time whichever is recorded last. A sign-in takes `now` before it hashes, so a failure with an earlier `now` can be recorded second.
 
-The throttle first counted, then wrote the failure's own `now` in a second call, `:ets.update_element/3`. A model of the throttle (macaw_compose#67) found two ways that shortened a wait: a failure recorded second overwrote a later time with its earlier one, and a check between the two calls read the new count from the old time. Both are fixed by the one update.
+The throttle first counted, then wrote the failure's own `now` in a second call, `:ets.update_element/3`. The model (§7) found two ways that shortened a wait: a failure recorded second overwrote a later time with its earlier one, and a check between the two calls read the new count from the old time. Both are fixed by the one update (macaw_compose#67).
 
 ```test:throttle-failure-order
 five failures at 0, then one at 2 000 and one at 1 000, recorded in that order: both rows hold 7 failures at 2 000; check gives {:delay, 1} at 5 999 and :ok at 6 000
@@ -130,3 +130,40 @@ uma's five failures at 0 and vic's one at a day: sweep at a day forgets nothing;
 a failure two days old and one now: a :sweep sent to the owner forgets the first and keeps the second
 ```
 
+## 7. The model {#auth-throttle-model}
+
+`Macaw.Auth.Specs.Throttle` (`specs/throttle_spec.ex`, compiled in dev and test only) is an [extla](https://github.com/dcoai/extla) model of the throttle: the table as a state machine shared by every sign-in in flight. extla checks it over every interleaving, and a test drives the real table through the model's behaviors.
+
+**State.** `table`, the rows, `{key, failures, last}`; `now`; `proc`, each sign-in in flight (idle, admitted at `ts` and verifying, or part-way through recording its failure); and `truth`, a ghost: the failures counted on each key since its last reset, and the latest of their times. Two history variables record a broken rule: `early_admit` and `address_lowered`.
+
+**Actions.** `attempt(p, u, a)`: `check/3` at `now` admits a sign-in (`a` = `:none` is a caller with no address). `succeed(p)`: `success/1`. `fail(p)`: `failure/3` with the admission's time, which may be older than another sign-in's failure. `tick(d)`, and `sweep`.
+
+**Invariants**, over 8 988 reachable states:
+- `no_early_admit`: an attempt is admitted only once each of its keys' waits has passed since its last failure (by `truth`);
+- `failures_each_count`: a key no failure is part-way through counts every failure since its last reset;
+- `last_is_latest`: such a key holds the latest of its failures' times;
+- `success_keeps_address`: a success never lowers an address's count, whoever's failures built it;
+- `wait_capped`: no key waits longer than the cap.
+
+**What is abstracted.** A failure updates its two keys in one step: every operation reads and writes one key alone, so the order across keys changes nothing a key's own history shows. Within a key, the steps are the code's. A check and the failure after it are separate steps, so concurrent sign-ins can all be admitted before any failure is counted.
+
+**Constants.** The code's (five free failures, 1 000 ms, a 15-minute cap, a day's memory) when the model is run against the code; a scaled instance when it is checked exhaustively (one free failure, waits of 1 and 2, a sweep after 3, a clock to 4, at most three failures a key, two usernames, one address, two sign-ins in flight). The rules are the same; the scaled waits keep the state space small. Three constants select a defect instead of the design, and the checker finds each:
+- `atomic_stamp: false`, the throttle as it shipped (count, then write the time): `no_early_admit` and `last_is_latest` fail, and `failures_each_count` when a sweep falls between the two calls;
+- `atomic_increment: false`, a lookup then an insert: `failures_each_count` fails;
+- `success_resets_address: true`: `success_keeps_address` and `no_early_admit` fail.
+
+**Running it.** `mix auth.verify` runs `mix extla.check` on every model (here, the one), and is the CI `models` job. It warns that `stamp` and `write` are never enabled: they are the defects' second steps. `mix test` runs the defects' checks (`test/macaw/auth/specs/throttle_spec_test.exs`) and the conformance check (`throttle_conformance_test.exs`).
+
+**Conformance.** Behaviors are drawn from the model at the code's constants, weighted toward failures so that a walk reaches the cap. Each step is applied to the real table, and after every step the table must hold the model's rows, and `check/3` must give the model's wait for every username and address. It found the shipped throttle's out-of-order time at once, and finds a `success/1` that also forgets addresses.
+
+```test:throttle-model
+mix auth.verify: Macaw.Auth.Specs.Throttle verifies, every invariant over every interleaving; with no address too
+```
+
+```test:throttle-model-defects
+each defect's constant set: the checker finds a counterexample to the invariant it breaks (atomic_stamp: false, no_early_admit and last_is_latest; atomic_increment: false, failures_each_count; success_resets_address: true, success_keeps_address and no_early_admit)
+```
+
+```test:throttle-model-conformance
+behaviors drawn from the model at the code's constants, two sign-ins in flight: after every step the real table holds the model's rows, and check/3 gives the model's wait for every username and address; the shipped two-step failure, or a success that forgets addresses, fails it
+```

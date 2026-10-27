@@ -51,6 +51,10 @@ defmodule Macaw.Auth.ApplicationTest do
 
     for dep <- [:ecto_sqlite3, :stream_data], do: assert(elem(deps[dep], 1)[:only] == :test)
 
+    for {dep, requirement} <- [extla: "~> 0.6.0", surfex: "~> 0.10.0"] do
+      assert deps[dep] == {requirement, [only: [:dev, :test], runtime: false]}, inspect(dep)
+    end
+
     assert Mix.Project.config()[:elixir] == "~> 1.18"
 
     assert Enum.sort(Application.spec(:macaw_auth, :applications) -- [:kernel, :stdlib, :elixir]) --
