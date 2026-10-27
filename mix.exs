@@ -1,0 +1,39 @@
+defmodule Macaw.Auth.MixProject do
+  use Mix.Project
+
+  @version "0.1.0-dev"
+
+  def project do
+    [
+      app: :macaw_auth,
+      version: @version,
+      elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
+      start_permanent: Mix.env() == :prod,
+      deps: deps(),
+      description:
+        "Authentication for Phoenix hosts: a narrow contract with a native backend " <>
+          "(passwords, LDAP, hashed sessions, throttling, TOTP).",
+      package: [licenses: ["MIT"]],
+      docs: [main: "readme", extras: ["README.md"]]
+    ]
+  end
+
+  def application do
+    [mod: {Macaw.Auth.Application, []}, extra_applications: [:logger, :crypto]]
+  end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
+  defp deps do
+    [
+      {:macaw_plug, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_plug.git", tag: "v0.1.0"},
+      {:plug, "~> 1.16"},
+      {:telemetry, "~> 1.2"},
+      {:phoenix_live_view, "~> 1.0", optional: true},
+      {:phoenix_pubsub, "~> 2.1", optional: true},
+      {:stream_data, "~> 1.1", only: :test}
+    ]
+  end
+end

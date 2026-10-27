@@ -1,0 +1,61 @@
+# CI for macaw_auth: the hard gate that keeps main green. Every push and
+# merge request runs the checks the work-item skills require locally, plus
+# American spelling. Group runner tagged DCOTek, pinned hexpm image so a
+# toolchain bump is a deliberate commit.
+
+variables:
+  ELIXIR_IMAGE: hexpm/elixir:1.20.4-erlang-29.0.5-debian-bookworm-20260824-slim
+
+default:
+  tags:
+    - DCOTek
+  interruptible: true
+
+stages:
+  - check
+  - test
+
+.elixir:
+  image: $ELIXIR_IMAGE
+  variables:
+    MIX_ENV: test
+  before_script:
+    # Git dependencies (macaw_plug) come over HTTPS with this job's token:
+    # the image has no git, and the SSH URLs in mix.exs need a key CI lacks.
+    # macaw_plug allowlists this project's job token.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates > /dev/null
+    - git config --global url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.conet.yarina.org/".insteadOf "git@gitlab.conet.yarina.org:"
+    - mix local.hex --force
+    - mix local.rebar --force
+    - mix deps.get
+  cache:
+    key:
+      files:
+        - mix.lock
+    paths:
+      - deps
+      - _build
+
+format:
+  extends: .elixir
+  stage: check
+  script:
+    - mix format --check-formatted
+
+compile:
+  extends: .elixir
+  stage: check
+  script:
+    - mix compile --force --warnings-as-errors
+
+spelling:
+  image: $ELIXIR_IMAGE
+  stage: check
+  script:
+    - elixir ci/spelling.exs
+
+test:
+  extends: .elixir
+  stage: test
+  script:
+    - mix test
