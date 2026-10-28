@@ -79,7 +79,7 @@ with no user, an empty or nil password is {:error, :no_password}, an empty or mi
 - **NAME in an answer is the stored username,** lower case.
 - **A role is a word, not a flag:** `add` needs at least one `--role`, and `roles` at least one role; a role that is empty or starts with `-` is a usage error.
 - **The errors:** `"no user named NAME"`; `"NAME's roles come from the directory SOURCE"` and `"NAME's password is checked by the directory SOURCE"` for a directory user; a changeset's errors on one line, `"username: has already been taken"`; for a missing password, `"set VAR to the password (it is never read from the command line)"`; for any other shape of words, `"usage: "` and the commands (`Macaw.Auth.Native.UserCommands.usage/0`).
-- **Words are matched as strings;** nothing typed becomes an atom ([macaw_host 03 §1](https://gitlab.conet.yarina.org/dco-tek/macaw_host/-/blob/main/spec/03-release.md#host-release-protocol)).
+- **Words are matched as strings;** nothing typed becomes an atom ([macaw_host 03 §1](https://github.com/dcoai/macaw_host/blob/main/spec/03-release.md#host-release-protocol)).
 
 ```test:users-commands
 add Alice with roles admin and ops answers added "alice", and she signs in with them; list shows alice and a directory user erin, each with the seven keys; roles, password, disable, enable and reset-second-factor each answer their object and change what they say
@@ -116,15 +116,15 @@ disable nobody, roles and password of a directory user, add of a taken name, add
 
 ## 5. Release entry points {#auth-users-release}
 
-`Macaw.Auth.Native.Release` puts the commands on **macaw_host's release protocol** ([macaw_host 03 §1](https://gitlab.conet.yarina.org/dco-tek/macaw_host/-/blob/main/spec/03-release.md#host-release-protocol)), through `Macaw.Host.Release`, so an app's `<app>-ctl` runs them:
+`Macaw.Auth.Native.Release` puts the commands on **macaw_host's release protocol** ([macaw_host 03 §1](https://github.com/dcoai/macaw_host/blob/main/spec/03-release.md#host-release-protocol)), through `Macaw.Host.Release`, so an app's `<app>-ctl` runs them:
 - **`Macaw.Auth.Native.Release.bootstrap/0`:** `bootstrap NAME --role R`, the first admin (§2) through `Macaw.Auth.Native.UserCommands.bootstrap/3`, safe at every deployment: `{"ok": true, "created": NAME, "role": R}`, or, once any user exists, `{"ok": true, "created": null, "reason": "a user already exists"}`. Any other shape of words is `"usage: bootstrap NAME --role R"`;
 - **`Macaw.Auth.Native.Release.user/0`:** the commands of §3;
 - **the arguments** are the JSON array of strings in `<PREFIX>_CTL_ARGS` (`Macaw.Host.Release.ctl_args!/1`), **the password** `<PREFIX>_CTL_PASSWORD` (`ctl_password/1`), never on a command line; **malformed arguments** fail as macaw_host says, `"<PREFIX>_CTL_ARGS must be a JSON array of strings"` on stderr and exit status 1;
 - **the output** is one JSON object per line on stdout (`emit/1`); **a failure** is one line on stderr, `{"ok": false, "error": "…"}`, and exit status 1 (`fail/1`), never a stack trace;
-- **`<PREFIX>` is the app's `:env_prefix`** ([macaw_host 06 §3.1](https://gitlab.conet.yarina.org/dco-tek/macaw_host/-/blob/main/spec/06-ctl-generator.md#host-gen-required)), configured as `config :macaw_auth, Macaw.Auth.Native.Release, env_prefix: "MY_APP"`. **It has no default:** without it, both fail with `"config :macaw_auth, Macaw.Auth.Native.Release, env_prefix: is not set"`. `Macaw.Auth.Native.Release.bootstrap/1` and `Macaw.Auth.Native.Release.user/1` take the prefix instead, for an app's release module to delegate to;
-- they run where `bin/<app> eval` runs, a throwaway container of the image ([macaw_host 07 §6](https://gitlab.conet.yarina.org/dco-tek/macaw_host/-/blob/main/spec/07-ctl-script.md#host-script-docker)), so they work with the app stopped, **revoking with `announce: false`** (§1).
+- **`<PREFIX>` is the app's `:env_prefix`** ([macaw_host 06 §3.1](https://github.com/dcoai/macaw_host/blob/main/spec/06-ctl-generator.md#host-gen-required)), configured as `config :macaw_auth, Macaw.Auth.Native.Release, env_prefix: "MY_APP"`. **It has no default:** without it, both fail with `"config :macaw_auth, Macaw.Auth.Native.Release, env_prefix: is not set"`. `Macaw.Auth.Native.Release.bootstrap/1` and `Macaw.Auth.Native.Release.user/1` take the prefix instead, for an app's release module to delegate to;
+- they run where `bin/<app> eval` runs, a throwaway container of the image ([macaw_host 07 §6](https://github.com/dcoai/macaw_host/blob/main/spec/07-ctl-script.md#host-script-docker)), so they work with the app stopped, **revoking with `announce: false`** (§1).
 
-The app's own commands ([macaw_host 06 §4](https://gitlab.conet.yarina.org/dco-tek/macaw_host/-/blob/main/spec/06-ctl-generator.md#host-gen-app-commands)) run them with `Ctl.Docker.eval_args/3`, the expression `Macaw.Auth.Native.Release.user()` (or `bootstrap()`), the words as JSON and the password **passed by name:**
+The app's own commands ([macaw_host 06 §4](https://github.com/dcoai/macaw_host/blob/main/spec/06-ctl-generator.md#host-gen-app-commands)) run them with `Ctl.Docker.eval_args/3`, the expression `Macaw.Auth.Native.Release.user()` (or `bootstrap()`), the words as JSON and the password **passed by name:**
 
 ```elixir
 eval_args(env, "Macaw.Auth.Native.Release.user()", [

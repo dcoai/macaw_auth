@@ -253,7 +253,7 @@ struct!(Macaw.Auth.User, %{username: "a"}) and struct!(Macaw.Auth.Session, %{id:
 
 ## 8. The viewer {#auth-viewer}
 
-`Macaw.Auth.viewer/1` gives a Macaw page its viewer from the signed-in user: `%{id, username, roles, source}`, or nil when signed out. It takes a conn or socket (anything with `assigns`) or an assigns map, and reads `:current_user`. **Identity and access only:** display preferences are state, never part of the viewer ([macaw_compose 01 §2](https://gitlab.conet.yarina.org/dco-tek/macaw_compose/-/blob/main/spec/01-vocabulary.md#vocab-data)), and the session, `display_name` and `extra` stay out.
+`Macaw.Auth.viewer/1` gives a Macaw page its viewer from the signed-in user: `%{id, username, roles, source}`, or nil when signed out. It takes a conn or socket (anything with `assigns`) or an assigns map, and reads `:current_user`. **Identity and access only:** display preferences are state, never part of the viewer ([macaw_compose 01 §2](https://github.com/dcoai/macaw/blob/main/spec/01-vocabulary.md#vocab-data)), and the session, `display_name` and `extra` stay out.
 
 ```test:viewer
 a conn with a signed-in admin gives exactly %{id: id, username: name, roles: ["admin"], source: "local"}; a signed-out conn gives nil

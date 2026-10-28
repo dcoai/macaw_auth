@@ -1,5 +1,7 @@
 # macaw_auth
 
+Public home: [github.com/dcoai/macaw_auth](https://github.com/dcoai/macaw_auth) · Docs: [hexdocs.pm](https://hexdocs.pm/macaw_auth)
+
 Authentication for Phoenix hosts, implemented once for the Macaw family's host applications (dco-tek/macaw_compose#32). A narrow contract that apps use, with backends behind it.
 
 | Module | What it does |
@@ -11,7 +13,7 @@ Authentication for Phoenix hosts, implemented once for the Macaw family's host a
 | `Macaw.Auth.Live` | LiveView `on_mount` hooks that disconnect a page the moment its session is revoked |
 | `Macaw.Auth.Conformance` | the kit every backend runs |
 
-Backends: `Macaw.Auth.Native` (passwords, LDAP, hashed sessions, throttling, TOTP), here, and `Macaw.Auth.Ash` (AshAuthentication), in its own library, [macaw_auth_ash](https://gitlab.conet.yarina.org/dco-tek/macaw_auth_ash), so this one never depends on Ash.
+Backends: `Macaw.Auth.Native` (passwords, LDAP, hashed sessions, throttling, TOTP), here, and `Macaw.Auth.Ash` (AshAuthentication), in its own library, [macaw_auth_ash](https://github.com/dcoai/macaw_auth_ash), so this one never depends on Ash.
 
 The native backend: users and sessions in the host's repo (`mix macaw_auth.gen.migration` writes the `macaw_auth_users`, `macaw_auth_sessions` and second-factor migrations, only those a host lacks), and `authenticate/2` through a chain of sources tried in order, where the first that knows the user decides: local password hashes (bcrypt or argon2, rehashed at sign-in) and LDAP directories over OTP's `:eldap` (TLS verified, plaintext refused unless allowed, directory users provisioned at first sign-in with their roles re-derived at every one). `mix macaw_auth.ldap.check SOURCE USERNAME` walks a directory sign-in step by step. Sessions store only a SHA-256 of their 32-byte token, expire after `session_idle_days` (default 14) unused, and record use at most hourly; sign-in failures back off per username and per client address (2^(n-5) s after five, capped at 15 minutes). The second factor is TOTP (RFC 6238 via `nimble_totp`, ±1 step, each step accepted once by a conditional update) with ten single-use recovery codes stored as SHA-256; the secret is sealed at rest with AES-256-GCM under `sealing_key`, and code attempts go through the same throttle. `totp_required` (`true` or a list of roles) makes a user who hasn't enrolled owe enrollment. `Macaw.Auth.Native.enroll_begin/2`, `enroll_confirm/3`, `disable/3`, `admin_reset/2`, `regenerate_recovery_codes/2`, and `Macaw.Auth.Plug.verify_second_factor/2` for the step's page.
 
@@ -59,4 +61,4 @@ plug :fetch_current_user
 
 **LiveView sockets.** `log_in/3` puts `live_socket_id` (`"macaw_auth_sessions:<session id>"`) in the session. With `:endpoint` configured, every revocation (`Macaw.Auth.revoke/2`, sign-out) broadcasts `"disconnect"` on it, so Phoenix drops the session's sockets; without it, the hooks' own guard still takes revoked pages away.
 
-Part of [Macaw](https://gitlab.conet.yarina.org/dco-tek/macaw_compose) (spec/00 §4, host libraries). Released by git tag.
+Part of [Macaw](https://github.com/dcoai/macaw) (spec/00 §4, host libraries). Released by git tag.

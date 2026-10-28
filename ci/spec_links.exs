@@ -5,7 +5,7 @@
 # - A relative link names a file in spec/ (or a path from the repository root),
 #   and its anchor, if any, is declared as {#anchor} in that file.
 # - A link into another Macaw repository's spec
-#   (https://gitlab.conet.yarina.org/dco-tek/<repo>/-/blob/main/spec/FILE#anchor)
+#   (https://github.com/dcoai/<repo>/blob/main/spec/FILE#anchor, its public home)
 #   is checked against the sibling checkout ../<repo> when one is present
 #   (a workstation), file and anchor both; without one (CI) its shape is checked.
 #
@@ -14,7 +14,7 @@
 # repository unchanged; it reads the repository it runs in.
 
 defmodule SpecLinks do
-  @cross ~r{^https://gitlab\.conet\.yarina\.org/dco-tek/(macaw[a-z_]*)/-/blob/main/spec/([0-9A-Za-z._-]+\.md)(?:#([a-z0-9-]+))?$}
+  @cross ~r{^https://github\.com/dcoai/(macaw[a-z_]*)/blob/main/spec/([0-9A-Za-z._-]+\.md)(?:#([a-z0-9-]+))?$}
 
   def run do
     files = Path.wildcard("spec/*.md") ++ Enum.filter(["README.md"], &File.exists?/1)

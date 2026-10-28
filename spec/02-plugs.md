@@ -18,7 +18,7 @@ end
 ```
 
 - **`fetch_session` comes first:** the token is kept in the session.
-- **`Macaw.Plug.ClientIp` runs before these,** so a session records, and the throttle counts, the client's address, not a proxy's ([macaw_plug 01 §4](https://gitlab.conet.yarina.org/dco-tek/macaw_plug/-/blob/main/spec/01-client-ip.md#plug-client-ip-call)).
+- **`Macaw.Plug.ClientIp` runs before these,** so a session records, and the throttle counts, the client's address, not a proxy's ([macaw_plug 01 §4](https://github.com/dcoai/macaw_plug/blob/main/spec/01-client-ip.md#plug-client-ip-call)).
 - **`fetch_flash` runs before `require_role/2` and `authorize/2`,** or their refusal goes home without saying why (§4).
 
 ## 1. The session keys {#auth-plug-keys}
