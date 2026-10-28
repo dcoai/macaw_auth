@@ -2,7 +2,7 @@ defmodule Macaw.Auth.MixProject do
   use Mix.Project
 
   @source_url "https://github.com/dcoai/macaw_auth"
-  @version "0.4.2"
+  @version "0.4.3"
 
   def project do
     [
@@ -58,7 +58,7 @@ defmodule Macaw.Auth.MixProject do
       {:macaw_plug, "~> 0.2.0"},
       # The release side of <app>-ctl's protocol (Macaw.Host.Release), for the
       # user commands' release entry points (macaw_compose#75).
-      {:macaw_host, "~> 0.1.4"},
+      {:macaw_host, "~> 0.2.0"},
       {:plug, "~> 1.16"},
       {:telemetry, "~> 1.2"},
       {:nimble_totp, "~> 1.0"},

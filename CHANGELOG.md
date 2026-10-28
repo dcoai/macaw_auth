@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.3 (2026-10-28)
+
+- `macaw_host` `~> 0.2.0`, so a host can take its new release alongside `macaw_auth` (dco-tek/macaw/macaw#182).
+
 ## v0.4.2 (2026-10-28)
 
 - `macaw_plug` `~> 0.2.0`, so a host can take its new security-header options alongside `macaw_auth` (dco-tek/macaw/macaw#178).
