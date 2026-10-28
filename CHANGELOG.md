@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.4.2 (2026-10-28)
 
+- `macaw_plug` `~> 0.2.0`, so a host can take its new security-header options alongside `macaw_auth` (dco-tek/macaw/macaw#178).
 - The macaw logo in the docs and the README (macaw#175).
 - CI: the LDAP fixture image moved with the server, now Collpa: `dco-tek/macaw/collpa/ci-ldap` (collpa#146).
 

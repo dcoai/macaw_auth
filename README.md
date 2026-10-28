@@ -26,7 +26,7 @@ Users are administered without host code: `Macaw.Auth.Native.bootstrap_admin/1` 
 From Hex:
 
 ```elixir
-{:macaw_auth, "~> 0.4.1"}
+{:macaw_auth, "~> 0.4.2"}
 ```
 
 Phoenix and LiveView are required dependencies: the plugs redirect with `Phoenix.Controller` and flash a refused role, so the browser pipeline needs `fetch_flash`.

@@ -43,7 +43,7 @@ defmodule Macaw.Auth.ApplicationTest do
         do: assert(elem(deps[dep], 0) == requirement, inspect(dep))
 
     for dep <- [:plug, :telemetry, :ecto_sql, :nimble_totp], do: assert(Map.has_key?(deps, dep))
-    assert deps.macaw_plug == {"~> 0.1.4"}
+    assert deps.macaw_plug == {"~> 0.2.0"}
     assert deps.macaw_host == {"~> 0.1.4"}
 
     for dep <- [:bcrypt_elixir, :argon2_elixir],
