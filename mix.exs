@@ -1,6 +1,7 @@
 defmodule Macaw.Auth.MixProject do
   use Mix.Project
 
+  @source_url "https://github.com/dcoai/macaw_auth"
   @version "0.4.0"
 
   def project do
@@ -15,8 +16,9 @@ defmodule Macaw.Auth.MixProject do
       description:
         "Authentication for Phoenix hosts: a narrow contract with a native backend " <>
           "(passwords, LDAP, hashed sessions, throttling, TOTP).",
-      package: [licenses: ["MIT"]],
-      docs: [main: "readme", extras: ["README.md"]]
+      source_url: @source_url,
+      package: package(),
+      docs: [main: "readme", extras: ["README.md", "CHANGELOG.md"], source_ref: "v#{@version}"]
     ]
   end
 
@@ -32,6 +34,18 @@ defmodule Macaw.Auth.MixProject do
   defp elixirc_paths(:test), do: ["lib", "specs", "test/support"]
   defp elixirc_paths(:dev), do: ["lib", "specs"]
   defp elixirc_paths(_), do: ["lib"]
+
+  # Published on Hex from its public home, mirrored from GitLab (dco-tek/macaw_compose#155).
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{
+        "GitHub" => @source_url,
+        "Changelog" => "https://hexdocs.pm/macaw_auth/changelog.html"
+      },
+      files: ~w(lib spec mix.exs README.md LICENSE CHANGELOG.md .formatter.exs)
+    ]
+  end
 
   defp deps do
     [
@@ -53,6 +67,8 @@ defmodule Macaw.Auth.MixProject do
       {:phoenix_pubsub, "~> 2.1"},
       {:ecto_sqlite3, "~> 0.17", only: :test},
       {:stream_data, "~> 1.1", only: :test},
+      # Docs for Hex (macaw_compose#155); dev only.
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       # Spec, tests and code kept aligned (macaw_compose spec/00 §4.1); dev/test only.
       {:surfex, "~> 0.10.0", only: [:dev, :test], runtime: false},
       # `mix auth.verify` (spec/10 §7): the model of the throttle, from Hex.
