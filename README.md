@@ -1,5 +1,7 @@
 # macaw_auth
 
+> **This software is a very early release, and not ready for general use.**
+
 Public home: [github.com/dcoai/macaw_auth](https://github.com/dcoai/macaw_auth) · Docs: [hexdocs.pm](https://hexdocs.pm/macaw_auth)
 
 Authentication for Phoenix hosts, implemented once for the Macaw family's host applications (dco-tek/macaw_compose#32). A narrow contract that apps use, with backends behind it.

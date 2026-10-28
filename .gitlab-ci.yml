@@ -69,7 +69,7 @@ test:
   # registry allowlists this project's job token): LDAP with StartTLS on
   # 389, LDAPS on 636, with the CA in test/fixtures/ldap.
   services:
-    - name: gitlab.conet.yarina.org:5005/dco-tek/macaw/ci-ldap:014dfe666f5b803e
+    - name: gitlab.conet.yarina.org:5005/dco-tek/macaw/macaw_server/ci-ldap:014dfe666f5b803e
       alias: ldap
   variables:
     MIX_ENV: test

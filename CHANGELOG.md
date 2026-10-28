@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The README opens with the early-release notice (macaw#174).
 - Package metadata for Hex: the public home, the changelog link, the files shipped, and docs with `ex_doc` (macaw_compose#155).
 
 ## v0.4.0 (2026-10-27)
