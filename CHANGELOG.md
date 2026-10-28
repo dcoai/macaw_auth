@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## v0.4.1 (2026-10-28)
 
+- On Hex: depends on `macaw_plug ~> 0.1.4` and `macaw_host ~> 0.1.4` from Hex instead of their git tags, and the README installs from Hex (macaw#155).
 - The README opens with the early-release notice (macaw#174).
 - Package metadata for Hex: the public home, the changelog link, the files shipped, and docs with `ex_doc` (macaw_compose#155).
 

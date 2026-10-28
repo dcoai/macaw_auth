@@ -21,8 +21,10 @@ The native backend: users and sessions in the host's repo (`mix macaw_auth.gen.m
 
 Users are administered without host code: `Macaw.Auth.Native.bootstrap_admin/1` makes the first admin only while no user exists (safe at every boot), and `mix macaw_auth.user list | add NAME --role R | disable NAME | enable NAME | password NAME | roles NAME R… | reset-second-factor NAME` answers in JSON lines, the password from `MACAW_AUTH_USER_PASSWORD`, never argv. The same commands, and the bootstrap, are release entry points for an app's `<app>-ctl` (`Macaw.Auth.Native.Release`, on macaw_host's release protocol).
 
+From Hex:
+
 ```elixir
-{:macaw_auth, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_auth.git", tag: "v0.4.0"}
+{:macaw_auth, "~> 0.4.1"}
 ```
 
 Phoenix and LiveView are required dependencies: the plugs redirect with `Phoenix.Controller` and flash a refused role, so the browser pipeline needs `fetch_flash`.
@@ -63,4 +65,4 @@ plug :fetch_current_user
 
 **LiveView sockets.** `log_in/3` puts `live_socket_id` (`"macaw_auth_sessions:<session id>"`) in the session. With `:endpoint` configured, every revocation (`Macaw.Auth.revoke/2`, sign-out) broadcasts `"disconnect"` on it, so Phoenix drops the session's sockets; without it, the hooks' own guard still takes revoked pages away.
 
-Part of [Macaw](https://github.com/dcoai/macaw) (spec/00 §4, host libraries). Released by git tag.
+Part of [Macaw](https://github.com/dcoai/macaw) (spec/00 §4, host libraries). Released on Hex.
