@@ -35,7 +35,7 @@ defmodule Macaw.Auth.MixProject do
   defp elixirc_paths(:dev), do: ["lib", "specs"]
   defp elixirc_paths(_), do: ["lib"]
 
-  # Published on Hex from its public home, mirrored from GitLab (dco-tek/macaw_compose#155).
+  # Published on Hex from its public home, mirrored from GitLab (dco-tek/macaw/macaw#155).
   defp package do
     [
       licenses: ["MIT"],
@@ -49,10 +49,12 @@ defmodule Macaw.Auth.MixProject do
 
   defp deps do
     [
-      {:macaw_plug, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_plug.git", tag: "v0.1.0"},
+      {:macaw_plug,
+       git: "git@gitlab.conet.yarina.org:dco-tek/macaw/macaw_plug.git", tag: "v0.1.0"},
       # The release side of <app>-ctl's protocol (Macaw.Host.Release), for the
       # user commands' release entry points (macaw_compose#75).
-      {:macaw_host, git: "git@gitlab.conet.yarina.org:dco-tek/macaw_host.git", tag: "v0.1.1"},
+      {:macaw_host,
+       git: "git@gitlab.conet.yarina.org:dco-tek/macaw/macaw_host.git", tag: "v0.1.1"},
       {:plug, "~> 1.16"},
       {:telemetry, "~> 1.2"},
       {:nimble_totp, "~> 1.0"},

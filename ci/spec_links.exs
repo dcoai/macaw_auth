@@ -9,7 +9,7 @@
 #   is checked against the sibling checkout ../<repo> when one is present
 #   (a workstation), file and anchor both; without one (CI) its shape is checked.
 #
-# Each component has its own spec in its own repository (dco-tek/macaw_compose#61),
+# Each component has its own spec in its own repository (dco-tek/macaw/macaw#61),
 # so specs link to each other across repositories. Copied into each Macaw
 # repository unchanged; it reads the repository it runs in.
 

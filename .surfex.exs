@@ -25,6 +25,6 @@
   issues: [
     command: ["glab", "issue", "view", "{n}", "--repo", "{project}", "-F", "json"],
     state: "state",
-    project: "dco-tek/macaw_compose"
+    project: "dco-tek/macaw/macaw"
   ]
 ]
