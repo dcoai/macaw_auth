@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- CI: the LDAP fixture image moved with the server, now Collpa: `dco-tek/macaw/collpa/ci-ldap` (collpa#146).
+
 ## v0.4.1 (2026-10-28)
 
 - On Hex: depends on `macaw_plug ~> 0.1.4` and `macaw_host ~> 0.1.4` from Hex instead of their git tags, and the README installs from Hex (macaw#155).

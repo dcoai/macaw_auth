@@ -65,11 +65,11 @@ spec-links:
 test:
   extends: .elixir
   stage: test
-  # The OpenLDAP fixture directory for the :ldap tests, macaw's image (its
+  # The OpenLDAP fixture directory for the :ldap tests, Collpa's image (its
   # registry allowlists this project's job token): LDAP with StartTLS on
   # 389, LDAPS on 636, with the CA in test/fixtures/ldap.
   services:
-    - name: gitlab.conet.yarina.org:5005/dco-tek/macaw/macaw_server/ci-ldap:014dfe666f5b803e
+    - name: gitlab.conet.yarina.org:5005/dco-tek/macaw/collpa/ci-ldap:309a2b786e6fa13b
       alias: ldap
   variables:
     MIX_ENV: test
