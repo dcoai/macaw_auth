@@ -18,7 +18,13 @@ defmodule Macaw.Auth.MixProject do
           "(passwords, LDAP, hashed sessions, throttling, TOTP).",
       source_url: @source_url,
       package: package(),
-      docs: [main: "readme", extras: ["README.md", "CHANGELOG.md"], source_ref: "v#{@version}"]
+      docs: [
+        main: "readme",
+        extras: ["README.md", "CHANGELOG.md"],
+        source_ref: "v#{@version}",
+        logo: "brand/logo/macaw_scarlet.svg",
+        assets: %{"brand/logo" => "brand/logo"}
+      ]
     ]
   end
 

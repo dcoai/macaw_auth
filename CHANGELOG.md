@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The macaw logo in the docs and the README (macaw#175).
 - CI: the LDAP fixture image moved with the server, now Collpa: `dco-tek/macaw/collpa/ci-ldap` (collpa#146).
 
 ## v0.4.1 (2026-10-28)

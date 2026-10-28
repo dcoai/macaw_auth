@@ -1,3 +1,5 @@
+<img src="brand/logo/macaw_scarlet.svg" alt="The Macaw logo, a scarlet macaw in flight" width="128">
+
 # macaw_auth
 
 > **This software is a very early release, and not ready for general use.**
