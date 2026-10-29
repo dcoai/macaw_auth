@@ -7,6 +7,7 @@ defmodule Macaw.Auth.Native.UserCommands do
       add NAME --role R [--role R…]
       disable NAME
       enable NAME
+      delete NAME
       password NAME
       roles NAME R…
       reset-second-factor NAME
@@ -29,7 +30,7 @@ defmodule Macaw.Auth.Native.UserCommands do
   alias Macaw.Auth.Native.{Config, UserRecord}
 
   @usage "list | add NAME --role R [--role R…] | disable NAME | enable NAME | " <>
-           "password NAME | roles NAME R… | reset-second-factor NAME"
+           "delete NAME | password NAME | roles NAME R… | reset-second-factor NAME"
 
   @doc "The commands' usage, as an error names it after `usage: `."
   @spec usage() :: String.t()
@@ -117,6 +118,7 @@ defmodule Macaw.Auth.Native.UserCommands do
 
   defp parse(["disable", name]) when name != "", do: {:ok, {:disable, name}}
   defp parse(["enable", name]) when name != "", do: {:ok, {:enable, name}}
+  defp parse(["delete", name]) when name != "", do: {:ok, {:delete, name}}
   defp parse(["password", name]) when name != "", do: {:ok, {:password, name}}
 
   defp parse(["reset-second-factor", name]) when name != "",
@@ -173,6 +175,13 @@ defmodule Macaw.Auth.Native.UserCommands do
   defp command({:enable, name}, _password, _opts) do
     with {:ok, record} <- answer(Native.enable_user(name), name, :enable),
          do: {:ok, [%{ok: true, enabled: record.username}]}
+  end
+
+  defp command({:delete, name}, _password, opts) do
+    deleted = Native.delete_user(name, announce: Keyword.get(opts, :announce, true))
+
+    with {:ok, record} <- answer(deleted, name, :delete),
+         do: {:ok, [%{ok: true, deleted: record.username}]}
   end
 
   defp command({:password, name}, password, opts) do

@@ -179,6 +179,35 @@ defmodule Macaw.Auth.Native.ReleaseTest do
              ] = objects(out)
     end
 
+    @tag verifies: "users-release-delete"
+    test "delete answers the protocol's object; an unknown user fails with one stderr line", c do
+      # Here, over the test's repo: alice deleted can't sign in.
+      local_user!("alice", "first pw")
+
+      assert release(:user, c.prefix, ["delete", "alice"]) ==
+               [%{"ok" => true, "deleted" => "alice"}]
+
+      assert Native.get_user("alice") == nil
+      assert sign_in("alice", "first pw") == {:error, :invalid_credentials}
+
+      # As bin/<app> eval runs it.
+      code = c.configured <> "Macaw.Auth.Native.Release.user()"
+
+      env = [
+        {"RT_CTL_ARGS", ~s(["add", "bob", "--role", "admin"])},
+        {"RT_CTL_PASSWORD", "correct horse battery"}
+      ]
+
+      assert {_, "", 0} = eval(c.dir, code, env)
+      assert {out, "", 0} = eval(c.dir, code, [{"RT_CTL_ARGS", ~s(["delete", "bob"])}])
+      assert objects(out) == [%{"ok" => true, "deleted" => "bob"}]
+      assert {"", "", 0} = eval(c.dir, code, [{"RT_CTL_ARGS", ~s(["list"])}])
+
+      assert {"", err, 1} = eval(c.dir, code, [{"RT_CTL_ARGS", ~s(["delete", "nobody"])}])
+      assert [line] = String.split(err, "\n", trim: true)
+      assert JSON.decode!(line) == %{"ok" => false, "error" => "no user named nobody"}
+    end
+
     @tag verifies: "users-release-fresh-vm-errors"
     test "a user's error, malformed arguments and a missing env_prefix: one stderr line, exit status 1",
          c do

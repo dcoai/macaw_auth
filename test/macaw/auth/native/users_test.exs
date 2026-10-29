@@ -1,9 +1,11 @@
 defmodule Macaw.Auth.Native.UsersTest do
   use Macaw.Auth.DataCase, async: false
 
+  import Ecto.Query, only: [where: 2]
+
   alias Macaw.Auth
   alias Macaw.Auth.Native
-  alias Macaw.Auth.Native.{Totp, UserRecord}
+  alias Macaw.Auth.Native.{RecoveryCodeRecord, SessionRecord, Totp, UserRecord}
 
   @t0 ~U[2026-10-01 12:00:00.000000Z]
   @key :crypto.strong_rand_bytes(32)
@@ -124,6 +126,47 @@ defmodule Macaw.Auth.Native.UsersTest do
 
       assert Native.disable_user("nobody") == {:error, :not_found}
       assert Native.enable_user("nobody") == {:error, :not_found}
+    end
+
+    @tag verifies: "users-delete"
+    test "delete_user/2 revokes a user's sessions, then deletes them with their recovery codes" do
+      record = local_user!("mona", "correct horse battery")
+      user = Native.to_user(record)
+      {:ok, %{secret: secret}} = Native.enroll_begin(user)
+      {:ok, [_ | _]} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+      enrolled = Native.to_user(Repo.get!(UserRecord, user.id))
+      {:ok, token, _} = Auth.create_session(enrolled)
+      {:ok, _, _} = Auth.create_session(enrolled)
+      :ok = Auth.subscribe(record.id)
+
+      assert {:ok, %UserRecord{id: id, username: "mona"}} = Native.delete_user(" Mona ")
+      assert id == record.id
+      assert Repo.get(UserRecord, id) == nil
+      assert Repo.aggregate(where(SessionRecord, user_id: ^id), :count) == 0
+      assert Repo.aggregate(where(RecoveryCodeRecord, user_id: ^id), :count) == 0
+      assert Auth.fetch(token) == {:error, :invalid}
+      assert_receive {:sessions_revoked, [_, _]}
+
+      # Refused exactly as a user who never was.
+      assert sign_in("mona", "correct horse battery") == {:error, :invalid_credentials}
+      assert sign_in("nobody", "correct horse battery") == {:error, :invalid_credentials}
+
+      # With announce: false the session goes and no page is told.
+      nina = local_user!("nina", "correct horse battery")
+      {:ok, token, _} = Auth.create_session(Native.to_user(nina))
+      :ok = Auth.subscribe(nina.id)
+
+      assert {:ok, _} = Native.delete_user("nina", announce: false)
+      assert Auth.fetch(token) == {:error, :invalid}
+      refute_receive {:sessions_revoked, _}, 50
+
+      # A directory user is deleted too.
+      Repo.insert!(%UserRecord{username: "erin", source: "nas", roles: ["viewer"]})
+      assert {:ok, %UserRecord{username: "erin"}} = Native.delete_user("erin")
+      assert Native.get_user("erin") == nil
+
+      assert Native.delete_user("nobody") == {:error, :not_found}
+      assert Native.delete_user("mona") == {:error, :not_found}
     end
 
     @tag verifies: "users-set-password"
@@ -248,6 +291,15 @@ defmodule Macaw.Auth.Native.UsersTest do
       assert {:ok, _} = Native.set_password("kim", "another password", announce: false)
       assert_received {^ref, %{event: :revoked, reason: :password_changed, user_id: id}}
       assert id == kim.id
+
+      # delete_user/2 revokes with reason :user_deleted; a deletion another
+      # made between its look-up and its delete is :not_found.
+      {:ok, _token, _} = Auth.create_session(Native.to_user(kim))
+      assert {:ok, _} = Native.delete_user("kim", announce: false)
+      assert_received {^ref, %{event: :revoked, reason: :user_deleted, user_id: ^id}}
+
+      after_first_query("macaw_auth_users", fn -> Repo.delete_all(UserRecord) end)
+      assert Native.delete_user("lee") == {:error, :not_found}
     end
 
     @tag verifies: "auth-users-bootstrap"

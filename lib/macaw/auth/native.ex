@@ -56,7 +56,7 @@ defmodule Macaw.Auth.Native do
 
   @behaviour Macaw.Auth.Backend
 
-  import Ecto.Query, only: [order_by: 2]
+  import Ecto.Query, only: [order_by: 2, where: 2]
 
   alias Macaw.Auth.Native.{Config, Sessions, Source, Throttle, Totp, UserRecord}
   alias Macaw.Auth.User
@@ -415,6 +415,32 @@ defmodule Macaw.Auth.Native do
   @spec enable_user(String.t()) :: {:ok, UserRecord.t()} | {:error, :not_found}
   def enable_user(username) do
     with {:ok, record} <- fetch_user(username), do: update(record, %{disabled_at: nil})
+  end
+
+  @doc """
+  Deletes a user, local or directory: every session of theirs revoked
+  first (reason `:user_deleted`), then the row, its sessions and recovery
+  codes going with it by the schema's cascade (and a host's own rows that
+  reference it, as the host declared them). Signing in as them is then
+  refused as an unknown user's is. `{:ok, record}`, the row as it was, or
+  `{:error, :not_found}`, also when another deletion took it in between.
+
+  A directory user deleted here is made again at their next sign-in that
+  the directory accepts (`Macaw.Auth.Native.Provision`): to keep them out,
+  remove them from the directory, or disable them instead.
+
+  Option `:announce` as `set_password/3`'s.
+  """
+  @spec delete_user(String.t(), keyword()) :: {:ok, UserRecord.t()} | {:error, :not_found}
+  def delete_user(username, opts \\ []) do
+    with {:ok, record} <- fetch_user(username) do
+      :ok = Sessions.revoke_all(record.id, :user_deleted, opts)
+
+      case Config.get().repo.delete_all(where(UserRecord, id: ^record.id)) do
+        {1, _} -> {:ok, record}
+        {0, _} -> {:error, :not_found}
+      end
+    end
   end
 
   @doc """

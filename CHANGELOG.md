@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `Macaw.Auth.Native.delete_user/2` deletes a user, their sessions revoked first (announced unless `announce: false`) and their sessions and recovery codes going with the row; `delete NAME` among `mix macaw_auth.user`'s commands and the release entry points (#1, dco-tek/macaw/macaw#93).
+
 ## v0.4.3 (2026-10-28)
 
 - `macaw_host` `~> 0.2.0`, so a host can take its new release alongside `macaw_auth` (dco-tek/macaw/macaw#182).

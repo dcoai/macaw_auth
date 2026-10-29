@@ -1,6 +1,6 @@
 # 13 — Native: administering users {#auth-users}
 
-A host administers the native backend's users without writing code for it: its first admin made at boot, and the everyday commands (list, add, disable, enable, a password, roles, a lost second factor) from a terminal during development (`mix macaw_auth.user`) and on a deployed host through its `<app>-ctl` (the release entry points). macaw_compose#32 proposed them, and #75 scoped them. All three run the same functions of `Macaw.Auth.Native` (§1) through one implementation of the commands, `Macaw.Auth.Native.UserCommands` (§3).
+A host administers the native backend's users without writing code for it: its first admin made at boot, and the everyday commands (list, add, disable, enable, delete, a password, roles, a lost second factor) from a terminal during development (`mix macaw_auth.user`) and on a deployed host through its `<app>-ctl` (the release entry points). macaw_compose#32 proposed them, and #75 scoped them; deleting a user came with macaw#93, for an adopter moving its users onto the library. All three run the same functions of `Macaw.Auth.Native` (§1) through one implementation of the commands, `Macaw.Auth.Native.UserCommands` (§3).
 
 ## 1. The user functions {#auth-users-api}
 
@@ -9,12 +9,13 @@ A host administers the native backend's users without writing code for it: its f
 - `Macaw.Auth.Native.get_user/1`: the user named, or nil, also for a string that can't be a username;
 - `Macaw.Auth.Native.disable_user/1`: sets `disabled_at`, so sign-in is refused (`:disabled` to someone with the right password, [05 §1.1](05-native-config.md#auth-native-refusal)) and each session at its next look-up, so open pages leave at their next re-check ([09 §4](09-native-sessions.md#auth-sessions-disabled)). **A user already disabled keeps when it was first done.** `{:ok, record}` or `{:error, :not_found}`;
 - `Macaw.Auth.Native.enable_user/1`: clears `disabled_at`; `{:ok, record}` or `{:error, :not_found}`;
+- `Macaw.Auth.Native.delete_user/2`: **every session of theirs revoked** (reason `:user_deleted`), **then the row deleted,** local or directory; its sessions and recovery codes go with it by the schema's cascade ([12](12-native-migrations.md)), as does any row of the host's that references it with `on_delete: :delete_all`. Signing in as them is then **refused as an unknown user's is** (`:invalid_credentials`, [05 §1.1](05-native-config.md#auth-native-refusal)). `{:ok, record}`, the row as it was, or `{:error, :not_found}`, also when another deletion took the row between the look-up and the delete. **A directory user deleted is made again** at their next sign-in the directory accepts ([06 §4](06-native-sources.md#auth-provision)): to keep them out, remove them from the directory, or disable them. It is the administrator's way to remove a user, so a host never deletes the row with its own repo, which would skip the revocation's push and couple the host to the table;
 - `Macaw.Auth.Native.set_password/3`: **a local user's** new password, hashed with the configured hasher, and **every session of theirs revoked** (reason `:password_changed`), so whoever held the old password is signed out. `{:error, :not_local}` for a directory user, whose password the directory checks and is never set here; `{:error, :no_password}` for nil or `""`; `{:error, :not_found}`;
 - `Macaw.Auth.Native.set_roles/2`: **a local user's** roles replaced, a list of non-empty strings (`{:error, :invalid_roles}` otherwise). `{:error, :not_local}` for a directory user, whose roles are re-derived from the directory at each sign-in ([06 §4](06-native-sources.md#auth-provision)); `{:error, :not_found}`.
 
 A user is local when their `source` is the configured `Password` source's name (`"local"` when none is configured), as `create_user/1` makes them.
 
-**The revocations an administrator's change makes** (`set_password/3`, `admin_reset/2`) go through `Macaw.Auth.Native.Sessions.revoke_all/3` ([09 §5](09-native-sessions.md#auth-sessions-revoke)), which tells the user's open pages, which disconnect. **Option `announce: false`** revokes without telling them: a process that is not the app's node (a mix task, a release's `eval`) has no page to tell, and the pages leave at their next re-check ([03 §4](03-live.md#auth-live-recheck)).
+**The revocations an administrator's change makes** (`set_password/3`, `admin_reset/2`, `delete_user/2`) go through `Macaw.Auth.Native.Sessions.revoke_all/3` ([09 §5](09-native-sessions.md#auth-sessions-revoke)), which tells the user's open pages, which disconnect. **Option `announce: false`** revokes without telling them: a process that is not the app's node (a mix task, a release's `eval`) has no page to tell, and the pages leave at their next re-check ([03 §4](03-live.md#auth-live-recheck)).
 
 ```test:users-list-get
 with carol, alice and a directory user bob, list_users/0 gives alice, bob, carol; get_user(" Alice ") is alice; get_user of "nobody" and "not a name!" is nil
@@ -22,6 +23,10 @@ with carol, alice and a directory user bob, list_users/0 gives alice, bob, carol
 
 ```test:users-disable-enable
 disable_user("dave") refuses dave's sign-in with :disabled; disabling "DAVE" again keeps the first disabled_at; enable_user lets him sign in; both answer {:error, :not_found} for nobody
+```
+
+```test:users-delete
+delete_user(" Mona ") of mona, enrolled, with two sessions and recovery codes, answers her row; her user, session and recovery-code rows are gone, her token no longer resolves, a subscriber hears {:sessions_revoked, [_, _]}, and signing in as her is {:error, :invalid_credentials} as for nobody; with announce: false nothing is heard; a directory user is deleted too; nobody is {:error, :not_found}
 ```
 
 ```test:users-set-password
@@ -72,6 +77,7 @@ with no user, an empty or nil password is {:error, :no_password}, an empty or mi
 | `add NAME --role R [--role R…]` | a local user (`create_user/1`) with those roles and the password: `{"ok": true, "added": NAME, "roles": [R…]}` |
 | `disable NAME` | `{"ok": true, "disabled": NAME}` |
 | `enable NAME` | `{"ok": true, "enabled": NAME}` |
+| `delete NAME` | the user deleted with their sessions (`delete_user/2`): `{"ok": true, "deleted": NAME}` |
 | `password NAME` | the password set (`set_password/3`): `{"ok": true, "password_set": NAME}` |
 | `roles NAME R…` | the roles replaced (`set_roles/2`): `{"ok": true, "roles_set": NAME, "roles": [R…]}` |
 | `reset-second-factor NAME` | the second factor cleared and the sessions revoked (`admin_reset/2`): `{"ok": true, "second_factor_reset": NAME}` |
@@ -83,6 +89,10 @@ with no user, an empty or nil password is {:error, :no_password}, an empty or mi
 
 ```test:users-commands
 add Alice with roles admin and ops answers added "alice", and she signs in with them; list shows alice and a directory user erin, each with the seven keys; roles, password, disable, enable and reset-second-factor each answer their object and change what they say
+```
+
+```test:users-delete-command
+delete " Nora " answers deleted "nora", and nora is gone with her session; delete of nobody is "no user named nobody"; delete with no name or with two names is the usage error
 ```
 
 ### 3.1 A password never comes from the command line {#auth-users-passwords}
@@ -139,6 +149,10 @@ bootstrap of Root with role admin answers created "root" and role "admin", and r
 
 ```test:users-release-commands
 user/1 runs add, list, roles, password, disable, enable and reset-second-factor, the words in <PREFIX>_CTL_ARGS and the password in <PREFIX>_CTL_PASSWORD, each answering the object of §3
+```
+
+```test:users-release-delete
+user/1 with ["delete", "alice"] answers {"ok": true, "deleted": "alice"}, and alice is gone and can't sign in; ["delete", "nobody"] fails with {"ok": false, "error": "no user named nobody"} and exit status 1
 ```
 
 ```test:users-release-fresh-vm

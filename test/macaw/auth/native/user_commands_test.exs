@@ -68,7 +68,7 @@ defmodule Macaw.Auth.Native.UserCommandsTest do
 
       assert UserCommands.usage() ==
                "list | add NAME --role R [--role R…] | disable NAME | enable NAME | " <>
-                 "password NAME | roles NAME R… | reset-second-factor NAME"
+                 "delete NAME | password NAME | roles NAME R… | reset-second-factor NAME"
 
       word = "frobnicate#{System.unique_integer([:positive])}"
       assert {:error, "usage: " <> _} = run([word, word])
@@ -130,6 +130,24 @@ defmodule Macaw.Auth.Native.UserCommandsTest do
 
       assert {:error, message} = UserCommands.bootstrap(["root", "hunter2"], "env pw", @opts)
       refute message =~ "hunter2"
+    end
+  end
+
+  describe "delete" do
+    @tag verifies: "users-delete-command"
+    test "deletes the user with their sessions, answering the stored name" do
+      nora = local_user!("nora", "correct horse battery")
+      {:ok, _token, _} = Macaw.Auth.Native.create_session(Macaw.Auth.Native.to_user(nora), [])
+
+      assert run(["delete", " Nora "]) == {:ok, [%{ok: true, deleted: "nora"}]}
+      assert Repo.get(UserRecord, nora.id) == nil
+      assert Macaw.Auth.Native.list_sessions(nora.id, []) == []
+
+      assert run(["delete", "nobody"]) == {:error, "no user named nobody"}
+
+      for words <- [["delete"], ["delete", ""], ["delete", "nora", "nina"]] do
+        assert run(words) == {:error, "usage: " <> UserCommands.usage()}, inspect(words)
+      end
     end
   end
 end

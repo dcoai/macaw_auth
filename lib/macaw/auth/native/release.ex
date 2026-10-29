@@ -30,7 +30,7 @@ defmodule Macaw.Auth.Native.Release do
          {"MY_APP_CTL_PASSWORD", password}])
 
   That VM is not the app's node: a revocation (`password`,
-  `reset-second-factor`) deletes the sessions, and the user's open pages
+  `reset-second-factor`, `delete`) deletes the sessions, and the user's open pages
   leave at their next re-check.
   """
 
@@ -51,7 +51,7 @@ defmodule Macaw.Auth.Native.Release do
 
   @doc """
   The user commands (`list`, `add NAME --role R…`, `disable NAME`,
-  `enable NAME`, `password NAME`, `roles NAME R…`,
+  `enable NAME`, `delete NAME`, `password NAME`, `roles NAME R…`,
   `reset-second-factor NAME`), as `mix macaw_auth.user` runs them
   (`Macaw.Auth.Native.UserCommands`). The prefix from the configuration.
   """

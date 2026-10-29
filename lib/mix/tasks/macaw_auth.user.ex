@@ -8,6 +8,7 @@ defmodule Mix.Tasks.MacawAuth.User do
       MACAW_AUTH_USER_PASSWORD='…' mix macaw_auth.user add NAME --role R [--role R…]
       mix macaw_auth.user disable NAME
       mix macaw_auth.user enable NAME
+      mix macaw_auth.user delete NAME
       MACAW_AUTH_USER_PASSWORD='…' mix macaw_auth.user password NAME
       mix macaw_auth.user roles NAME R…
       mix macaw_auth.user reset-second-factor NAME
@@ -21,7 +22,7 @@ defmodule Mix.Tasks.MacawAuth.User do
   show it; a `--password` or `-p` among the arguments is refused. It
   appears nowhere in the output.
 
-  `password` and `reset-second-factor` revoke the user's sessions; this
+  `password`, `reset-second-factor` and `delete` revoke the user's sessions; this
   task runs apart from the app, so their open pages leave at their next
   re-check rather than at once. The commands are
   `Macaw.Auth.Native.UserCommands`.
