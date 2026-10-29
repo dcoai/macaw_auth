@@ -174,32 +174,32 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       refute_received {:hasher, :verify}
     end
 
-    # As the password source's timing test: at a real cost, the hash
-    # dominates; medians and a 3x margin keep a busy runner from failing it.
+    # As the password source's: the same time, checked by what runs, never
+    # by timing two runs (#15). A checked attempt and a blocked one (a wrong
+    # guess or the right password) are each exactly one bcrypt operation and
+    # nothing else, and the stored hash is at the configured cost, the one
+    # `no_user_verify/0` hashes at, so the operations are the same work.
     @tag verifies: "throttle-timing-measured"
-    test "measured: a blocked attempt and a checked one are within a factor of three" do
-      previous = Application.get_env(:bcrypt_elixir, :log_rounds)
-      Application.put_env(:bcrypt_elixir, :log_rounds, 9)
-      on_exit(fn -> Application.put_env(:bcrypt_elixir, :log_rounds, previous) end)
-      local_user!("tess", "correct horse battery")
+    test "the same work: a blocked attempt and a checked one are each one bcrypt operation at the same cost" do
+      alias Macaw.Auth.Native.Hasher.Bcrypt
+      alias Macaw.Auth.Test.CountingHasher
 
-      checked =
-        median(fn ->
-          Throttle.reset()
-          {:error, :invalid_credentials} = sign_in("tess", "wrong", 0)
-        end)
+      configure!(hasher: CountingHasher)
+      tess = local_user!("tess", "correct horse battery")
+      refute Bcrypt.needs_rehash?(tess.hashed_password)
+
+      assert CountingHasher.work(fn ->
+               assert sign_in("tess", "wrong", 0) == {:error, :invalid_credentials}
+             end) == [:verify]
 
       for _ <- 1..5, do: Throttle.failure(key("tess"), nil, ms(0))
-      blocked = median(fn -> {:error, :throttled} = sign_in("tess", "wrong", 0) end)
 
-      assert blocked < checked * 3 and checked < blocked * 3,
-             "blocked #{blocked}us, checked #{checked}us"
+      for password <- ["wrong", "correct horse battery"] do
+        assert CountingHasher.work(fn ->
+                 assert sign_in("tess", password, 0) == {:error, :throttled}
+               end) == [:no_user_verify]
+      end
     end
-  end
-
-  defp median(fun) do
-    times = for _ <- 1..9, do: elem(:timer.tc(fun), 0)
-    times |> Enum.sort() |> Enum.at(4)
   end
 
   defp flush_hasher do

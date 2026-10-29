@@ -72,6 +72,16 @@ no-sleep:
   script:
     - elixir ci/no_sleep.exs
 
+# No test times its code (ci/no_timing.exs): no `:timer.tc`, monotonic clock
+# or perf counter in test/ or the conformance kit; a claim about time is
+# checked by the work that runs. The self-test first: planted timings must fail.
+no-timing:
+  image: $ELIXIR_IMAGE
+  stage: check
+  script:
+    - elixir ci/no_timing.exs --self-test
+    - elixir ci/no_timing.exs
+
 test:
   extends: .elixir
   stage: test

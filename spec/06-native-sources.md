@@ -64,7 +64,7 @@ with a counting hasher: an unknown user and an invalid username each spend no_us
 ```
 
 ```test:password-timing-measured
-at bcrypt cost 9, the median time to refuse an unknown user and a wrong password (nine each, the throttle emptied before each) are within a factor of three
+with a counting hasher, by the work each refusal does, never by timing it: a wrong password does exactly [verify], and an unknown user, an invalid username and a row without a hash each exactly [no_user_verify], nothing more; the stored hash is at the configured cost, the one no_user_verify hashes at, so each is one bcrypt operation at the same cost
 ```
 
 ```test:password-trim-case

@@ -118,7 +118,7 @@ with a counting hasher, a blocked attempt spends no_user_verify and no verify
 ```
 
 ```test:throttle-timing-measured
-at bcrypt cost 9, the medians of nine blocked and nine checked attempts are within a factor of three
+with a counting hasher, by the work each attempt does, never by timing it: a checked wrong guess does exactly [verify], and a blocked attempt, with a wrong or the right password, exactly [no_user_verify], nothing more; the stored hash is at the configured cost, the one no_user_verify hashes at, so each is one bcrypt operation at the same cost
 ```
 
 ## 6. The table and its sweep {#auth-throttle-table}

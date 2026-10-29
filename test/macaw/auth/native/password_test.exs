@@ -98,31 +98,31 @@ defmodule Macaw.Auth.Native.Source.PasswordTest do
       refute_received {:hasher, :no_user_verify}
     end
 
-    # At a real cost (bcrypt 2^9 rounds, tens of milliseconds a hash), so
-    # the hash dominates; the median and a 3x margin keep a busy CI runner
-    # from failing it. The throttle is emptied before each attempt, so all
-    # nine are checked rather than the last four refused unchecked.
+    # The same time, checked by what runs, never by timing two runs (#15):
+    # each refusal is exactly one bcrypt operation and nothing else, and the
+    # stored hash is at the configured cost, the one `no_user_verify/0`
+    # hashes at, so the operations are the same work.
     @tag verifies: "password-timing-measured"
-    test "measured: the medians are within a factor of three" do
-      previous = Application.get_env(:bcrypt_elixir, :log_rounds)
-      Application.put_env(:bcrypt_elixir, :log_rounds, 9)
-      on_exit(fn -> Application.put_env(:bcrypt_elixir, :log_rounds, previous) end)
-      local_user!("hank", "correct horse battery")
+    test "the same work: each refusal is one bcrypt operation at the same cost, and nothing more" do
+      alias Macaw.Auth.Native.Hasher.Bcrypt
+      alias Macaw.Auth.Test.CountingHasher
 
-      median = fn username ->
-        times =
-          for _ <- 1..9 do
-            Macaw.Auth.Native.Throttle.reset()
-            {us, {:error, :invalid_credentials}} = :timer.tc(fn -> sign_in(username, "wrong") end)
-            us
-          end
+      configure!(hasher: CountingHasher)
+      hank = local_user!("hank", "correct horse battery")
+      Repo.insert!(%UserRecord{username: "erin", source: "nas"})
+      refute Bcrypt.needs_rehash?(hank.hashed_password)
 
-        times |> Enum.sort() |> Enum.at(4)
+      for {username, call} <- [
+            {"hank", :verify},
+            {"nobody", :no_user_verify},
+            {"not a name!", :no_user_verify},
+            {"erin", :no_user_verify}
+          ] do
+        assert CountingHasher.work(fn ->
+                 assert sign_in(username, "wrong") == {:error, :invalid_credentials}
+               end) == [call],
+               username
       end
-
-      wrong = median.("hank")
-      unknown = median.("nobody")
-      assert unknown < wrong * 3 and wrong < unknown * 3, "unknown #{unknown}us, wrong #{wrong}us"
     end
   end
 
