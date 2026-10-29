@@ -55,11 +55,13 @@ spelling:
     - elixir ci/spelling.exs
 
 # Every spec link resolves (ci/spec_links.exs): links into another Macaw
-# repository's spec are checked by shape here, where no sibling checkout exists.
+# repository are checked by shape here, where no sibling checkout exists. The
+# self-test first: a planted broken link of each kind must fail.
 spec-links:
   image: $ELIXIR_IMAGE
   stage: check
   script:
+    - elixir ci/spec_links.exs --self-test
     - elixir ci/spec_links.exs
 
 # No test waits on the clock (ci/no_sleep.exs): no `Process.sleep` or
