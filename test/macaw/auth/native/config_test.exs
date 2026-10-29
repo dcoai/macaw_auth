@@ -86,7 +86,8 @@ defmodule Macaw.Auth.Native.ConfigTest do
     assert corp.groups == %{
              from: :search,
              base_dn: "cn=groups,dc=example,dc=test",
-             member_attr: "memberUid"
+             member_attr: "memberUid",
+             bind_dn: nil
            }
 
     assert Enum.sort(corp.role_mapping) == [

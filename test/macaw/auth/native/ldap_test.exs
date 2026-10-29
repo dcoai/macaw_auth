@@ -123,6 +123,38 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     end)
   end
 
+  @tag verifies: "ldap-group-account-fixture"
+  test "direct bind with a groups account: the groups read as the service account" do
+    account = fn password ->
+      nas(%{
+        groups: %{
+          base_dn: "cn=groups,#{@base}",
+          member_attr: "memberUid",
+          bind_dn: "cn=svc,#{@base}",
+          bind_password: password
+        }
+      })
+    end
+
+    assert {:ok, %{roles: ["admin"]}} =
+             auth(account.("svc-test-password"), "alice", "alice-password")
+
+    assert {:ok, %{roles: ["viewer"]}} =
+             auth(account.("svc-test-password"), "bob", "bob-password")
+
+    assert {:error, :invalid_credentials} = auth(account.("svc-test-password"), "alice", "wrong")
+
+    # The service bind is made: a wrong password for it fails the group search.
+    log =
+      capture_log(fn ->
+        assert {:error, :group_search_failed} =
+                 auth(account.("svc-wrong-secret"), "alice", "alice-password")
+      end)
+
+    assert log =~ "LDAP source nas: the group search failed"
+    refute log =~ "svc-wrong-secret"
+  end
+
   @tag verifies: "ldap-member-of"
   test "groups from memberOf" do
     member_of =

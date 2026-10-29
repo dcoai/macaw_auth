@@ -68,6 +68,17 @@ neither template nor search, both, a template without {username}, a filter "(uid
 
 Anything else: `"…groups: must be %{from: :member_of} or %{base_dn: …, member_attr: …}"`.
 
+**A groups service account** (`groups: %{base_dn, member_attr, bind_dn, bind_password}`), for a directory that lets a user read only their own entry: `bind_dn` and `bind_password` (a secret, [06 §1.1](06-native-sources.md#auth-source-settings)) are the account a **direct-bind** source binds as, after the user's own bind succeeded, to search for the groups (§4). Without them the user's own bind reads the groups, as it always did; the group search's map then has `bind_dn: nil`. They are refused:
+- **with `from: :member_of`:** `"…groups.bind_dn: and bind_password can't be used with from: :member_of (memberOf is read from the user's own entry)"`;
+- **in search mode:** `"…groups.bind_dn: is for a direct bind (user_dn_template): search mode reads the groups as search.bind_dn"`, a source having one service account;
+- **one without the other** (or an empty `bind_dn`): `"…groups.bind_dn: and bind_password must be set together"`; a reference that can't be read names `groups.bind_password` (`"…groups.bind_password: the environment variable GROUPS_PW is not set"`).
+
+The source keeps one service password, its `bind_password`: the search's, or the groups'.
+
+```test:ldap-group-account-config
+groups %{base_dn: "cn=g", bind_dn: "cn=svc", bind_password: "hunter2-groups"} on a direct-bind source parses to groups %{from: :search, base_dn: "cn=g", member_attr: "member", bind_dn: "cn=svc"} and bind_password "hunter2-groups", inspecting without "hunter2", string keys alike; without them bind_dn is nil; {:env, "GROUPS_PW"} resolves from :env and unset names groups.bind_password; with from: :member_of either key is refused, in search mode the pair is refused, one without the other is refused; no fault holds the password
+```
+
 ### 1.5 Access {#auth-ldap-access}
 
 - **`required_group`**, a group's CN or DN, which a user must be in to sign in at all;
@@ -82,7 +93,7 @@ a source with string keys and type "ldap", a search with a literal bind password
 
 ### 1.6 The service password stays hidden {#auth-ldap-secret}
 
-`bind_password` is resolved when the configuration is read; **no error message contains it, and the source's inspection leaves it out.**
+`bind_password`, the search's or the groups' (§1.4), is resolved when the configuration is read; **no error message contains it, no log line, answer or diagnostic step holds it, and the source's inspection leaves it out.**
 
 ```test:ldap-secret-hidden
 a search source with bind_password "hunter2-secret" inspects without "hunter2"
@@ -111,7 +122,7 @@ LDAPS with the test CA signs bob in; LDAPS by IP address (the certificate names 
 4. **Bind as that DN with the password;** refused, `:invalid_credentials`.
 5. **Read the entry:** a base-object search of the DN for the id, username, email and display-name attributes and `memberOf`. Not exactly one entry is `:user_not_found`; a refused search `:search_failed`.
 6. **The username** is the entry's first `username_attr` value, normalized as the users table requires ([06 §5](06-native-sources.md#auth-user-record)); not a valid one, `:invalid_username`. So the row's username is the directory's spelling, not what was typed.
-7. **The groups** (§4; refused, `:group_search_failed`), then **`required_group`** (`:not_in_group`), then **the roles** (`:no_role`).
+7. **The groups** (§4; refused, `:group_search_failed`, as is a refused bind as the groups' service account), then **`required_group`** (`:not_in_group`), then **the roles** (`:no_role`).
 
 The connection is closed after, whatever the outcome. **Every value sent to `:eldap`** (DN, password, filter value) **goes as its UTF-8 bytes,** so a non-ASCII password binds as the directory stored it (the old charlist conversion broke them).
 
@@ -137,11 +148,27 @@ search mode: alice signs in with ["admin"]; a wrong password is :invalid_credent
 
 The user's groups, each a DN and a CN:
 - **`from: :member_of`:** the entry's `memberOf` values, each group's CN read from the DN's leading `cn=` (escaped characters kept);
-- **a search:** for `memberUid`, the entry's `username_attr` value **as the directory spells it**; for `member` and `uniqueMember`, the user's DN. The filter is an equality match with that value **as data**, a subtree search under the groups' `base_dn` for each group's `cn`. **In search mode, the service account binds again** first, to read the groups; in direct-bind mode the user's own bind reads them.
+- **a search:** for `memberUid`, the entry's `username_attr` value **as the directory spells it**; for `member` and `uniqueMember`, the user's DN. The filter is an equality match with that value **as data**, a subtree search under the groups' `base_dn` for each group's `cn`. **In search mode, the service account binds again** first, to read the groups. **In direct-bind mode, the groups' service account** (§1.4), when there is one, **binds** after the user's bind succeeded (refused, `:group_search_failed`, logged naming the source and never the password), and the group search runs as it; without one, the user's own bind reads them. A wrong user password never reaches the service bind.
 
 **A group matches a name** (`Macaw.Auth.Native.Source.Ldap.member?/2`) when the name equals the group's DN or its CN, **ignoring case**.
 - **`required_group`,** when set, must match one of the user's groups, or the user is refused (`:not_in_group`).
 - **The roles are every role every matching `role_mapping` group maps to,** each once. With none, the `default_role`; with no default either, the user is refused (`:no_role`).
+
+```test:ldap-group-account
+against a directory that lets only cn=svc read the groups: a direct-bind source with groups bind_dn cn=svc signs alice in with ["admin"] and both her groups, binding as alice, then as cn=svc with its password, the group search run as cn=svc; a wrong user password is :invalid_credentials with no service bind
+```
+
+```test:ldap-group-account-absent
+the same directory, without a groups account: the group search runs as alice and finds nothing, so alice is :not_in_group, with no service bind; where any bind may read the groups, alice signs in with ["admin"], the groups read as alice
+```
+
+```test:ldap-group-account-secret
+a wrong groups bind_password is :group_search_failed, with no group search made, and the log line names the source and its explanation; neither password is in the log, the answer of a sign-in that succeeded, the source's inspection, or the diagnostic steps
+```
+
+```test:ldap-group-account-fixture
+on the fixture directory, a direct-bind source whose groups bind as cn=svc with svc-test-password signs alice in with ["admin"] and bob with ["viewer"]; a wrong user password is :invalid_credentials; a wrong service password is :group_search_failed, logged without it
+```
 
 ```test:ldap-roles
 alice in macaw and macaw-admin, with mapping %{"macaw-admin" => ["admin", "operator"], "macaw" => "viewer"}, gets exactly admin, operator and viewer
@@ -258,7 +285,7 @@ valid_template? is true for (uid={username}) and an and/or over uid and mail; fa
 | `:search_failed` | the search failed: the service bind was refused, or the directory refused the search |
 | `:user_not_found` | no entry matched the username |
 | `:ambiguous_user` | more than one entry matched the username |
-| `:group_search_failed` | the group search failed |
+| `:group_search_failed` | the group search failed: the service bind was refused, or the directory refused the search |
 | `:not_in_group` | the user is not in the required group |
 | `:no_role` | no role_mapping matched the user's groups and there is no default_role |
 | `:invalid_username` | the directory's username attribute is not a valid username (1–64 of a-z 0-9 . _ @ + -) |
@@ -277,7 +304,7 @@ through the chain, alice is provisioned with source "nas", no hash and ["admin"]
 
 ## 7. Diagnostics {#auth-ldap-check}
 
-`Macaw.Auth.Native.Source.Ldap.diagnose/3` (`source`, `username`, `password`) runs the sign-in flow without signing in and says how each step went: `[{step, :ok | :error, detail}]`, **ending at the first failure.** The steps, in order: `"connect"` (a TCP connect to host and port), `"TLS"` (the transport: `"LDAPS, certificate and hostname verified"`, `"StartTLS, …"`, `"certificate NOT verified (verify_peer: false)"`, or plain LDAP's warning that passwords go unencrypted), `"find the user's DN"` (direct bind's DN, or `"searched <base> for <filter> as <bind_dn>"` / `"anonymously"`, the filter shown with the username filter-escaped), `"bind as the user"`, `"read attributes"`, `"username"`, `"groups"`, `"required group"` and `"roles"`. A failed step's detail is its reason's explanation (§6). **An empty password** is the single step `{"password", :error, …}`. **The password is used for the bind and appears nowhere in the result.**
+`Macaw.Auth.Native.Source.Ldap.diagnose/3` (`source`, `username`, `password`) runs the sign-in flow without signing in and says how each step went: `[{step, :ok | :error, detail}]`, **ending at the first failure.** The steps, in order: `"connect"` (a TCP connect to host and port), `"TLS"` (the transport: `"LDAPS, certificate and hostname verified"`, `"StartTLS, …"`, `"certificate NOT verified (verify_peer: false)"`, or plain LDAP's warning that passwords go unencrypted), `"find the user's DN"` (direct bind's DN, or `"searched <base> for <filter> as <bind_dn>"` / `"anonymously"`, the filter shown with the username filter-escaped), `"bind as the user"`, `"read attributes"`, `"username"`, **`"bind for the groups"`** (only for a direct bind with a groups service account, §1.4: `"bound as <bind_dn>"`, or the explanation of `:group_search_failed`), `"groups"` (read as that account when there is one), `"required group"` and `"roles"`. A failed step's detail is its reason's explanation (§6). **An empty password** is the single step `{"password", :error, …}`. **The password is used for the bind and appears nowhere in the result,** nor does the service account's.
 
 `mix macaw_auth.ldap.check SOURCE USERNAME` (`Mix.Tasks.MacawAuth.Ldap.Check`) prints it, a line a step (`ok     <step>: <detail>`, `FAILED <step>: <detail>`), and exits non-zero when a step failed:
 - **the password comes from `MACAW_AUTH_CHECK_PASSWORD`,** never the command line, where `ps` and shell history would show it; unset, the task stops: `"set MACAW_AUTH_CHECK_PASSWORD to the user's password (it is never read from argv)"`;
@@ -287,6 +314,10 @@ through the chain, alice is provisioned with source "nas", no hash and ["admin"]
 
 ```test:ldap-diagnose
 diagnose(nas, "alice", "alice-password") gives the nine steps all :ok, TLS "StartTLS, certificate and hostname verified", roles "admin", and nothing containing the password; a wrong password ends at "bind as the user"; carol ends at "required group"; search mode's DN step reads "searched … (uid=alice) as cn=svc,…"; without the CA it ends at TLS; on port 1 at connect
+```
+
+```test:ldap-group-account-diagnose
+diagnose of a direct-bind source with groups bind_dn cn=svc gives ten steps all :ok, "bind for the groups" "bound as cn=svc,…" between "username" and "groups", roles "admin", and neither password in the result; a wrong service password ends at "bind for the groups"; without the account there is no such step
 ```
 
 ```test:ldap-check-task

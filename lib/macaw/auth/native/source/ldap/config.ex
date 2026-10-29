@@ -18,18 +18,23 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
   - **Attributes:** `id_attr` (`entryUUID`; the DN when absent),
     `username_attr` (`uid`), `email_attr` (`mail`), `display_name_attr`
     (`cn`).
-  - **Groups:** `groups: %{base_dn, member_attr}` with `member_attr` one of
-    `member` (groupOfNames, the default), `uniqueMember`, or `memberUid`
-    (posixGroup, matched by the username), or `groups: %{from: :member_of}`.
+  - **Groups:** `groups: %{base_dn, member_attr, bind_dn, bind_password}`
+    with `member_attr` one of `member` (groupOfNames, the default),
+    `uniqueMember`, or `memberUid` (posixGroup, matched by the username),
+    or `groups: %{from: :member_of}`. `bind_dn` and `bind_password`, set
+    together and only with `user_dn_template`, are the service account a
+    direct-bind source reads the groups as; without them the user's own
+    bind reads them.
   - **Access:** `required_group` (a CN or DN), `role_mapping` (a map of
     group to a role or a list of roles; the user gets every mapped role of
     every group they are in) and `default_role` (a role, or a list, for a
     user no mapping matched). With neither a match nor a default, the user
     is refused (`:no_role`).
 
-  `bind_password` is a literal, `{:env, "VAR"}` or `{:file, path}`,
-  resolved here; no error message contains it, and the struct's inspection
-  hides it.
+  A `bind_password` (the search's or the groups') is a literal,
+  `{:env, "VAR"}` or `{:file, path}`, resolved here; no error message
+  contains it, and the struct's inspection hides it. A source has at most
+  one service account, so its password is the struct's one `bind_password`.
   """
 
   alias Macaw.Auth.Native.Settings
@@ -41,7 +46,7 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
            display_name_attr groups required_group role_mapping default_role)a
 
   @search_keys ~w(base_dn filter bind_dn bind_password)a
-  @group_keys ~w(from base_dn member_attr)a
+  @group_keys ~w(from base_dn member_attr bind_dn bind_password)a
 
   @doc "`{:ok, %Ldap{}}` or `{:error, \"sources[<name>].<key>: …\"}`."
   @spec parse(map(), keyword()) :: {:ok, Ldap.t()} | {:error, String.t()}
@@ -61,7 +66,7 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
          {:ok, timeout} <- Settings.int(s, :timeout_ms, 5000, 1..600_000, name),
          {:ok, finding} <- finding(s, name, context),
          {:ok, attrs} <- attrs(s, name),
-         {:ok, groups} <- groups(s[:groups], name),
+         {:ok, groups, group_password} <- groups(s[:groups], finding, name, context),
          {:ok, required} <- Settings.optional_string(s, :required_group, name),
          {:ok, mapping} <- mapping(Map.get(s, :role_mapping, %{}), name),
          {:ok, default_role} <- default_role(s[:default_role], name) do
@@ -84,7 +89,7 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
              role_mapping: mapping,
              default_role: default_role
            },
-           Map.merge(finding, attrs)
+           Map.merge(%{finding | bind_password: finding.bind_password || group_password}, attrs)
          )
        )}
     end
@@ -147,7 +152,7 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
          {:ok, base} <- Settings.required_string(search, :base_dn, name, "search.base_dn"),
          :ok <- filter(filter, name),
          {:ok, anonymous} <- Settings.bool(s, :allow_anonymous_search, false, name),
-         {:ok, password} <- bind_password(search, name, context) do
+         {:ok, password} <- bind_password(search, :"search.bind_password", name, context) do
       found = fn dn, pw ->
         {:ok,
          %{
@@ -183,15 +188,15 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
       else: Settings.fail(name, :"search.filter", "must be an LDAP filter containing {username}")
   end
 
-  defp bind_password(search, name, context) do
-    case Map.fetch(search, :bind_password) do
+  defp bind_password(map, label, name, context) do
+    case Map.fetch(map, :bind_password) do
       :error ->
         {:ok, nil}
 
       {:ok, ref} ->
         case Settings.secret(ref, Keyword.get_lazy(context, :env, &System.get_env/0)) do
           {:ok, value} -> {:ok, value}
-          {:error, why} -> Settings.fail(name, :"search.bind_password", why)
+          {:error, why} -> Settings.fail(name, label, why)
         end
     end
   end
@@ -209,41 +214,80 @@ defmodule Macaw.Auth.Native.Source.Ldap.Config do
     )
   end
 
-  defp groups(nil, _name), do: {:ok, nil}
+  # The groups, and the password of the service account that reads them
+  # (direct bind only), `{:ok, groups, password}`.
+  defp groups(nil, _finding, _name, _context), do: {:ok, nil, nil}
 
-  defp groups(%{} = groups, name) do
+  defp groups(%{} = groups, finding, name, context) do
     g = Settings.normalize(groups, @group_keys)
 
-    with :ok <- Settings.known_keys(g, @group_keys, name) do
-      case g do
-        %{from: from} when from in [:member_of, "member_of"] ->
-          {:ok, %{from: :member_of}}
-
-        %{base_dn: base} when is_binary(base) and base != "" ->
-          attr = Map.get(g, :member_attr, "member")
-
-          if attr in ~w(member uniqueMember memberUid),
-            do: {:ok, %{from: :search, base_dn: base, member_attr: attr}},
-            else:
-              Settings.fail(
-                name,
-                :"groups.member_attr",
-                "must be member, uniqueMember or memberUid"
-              )
-
-        _ ->
-          groups(:bad, name)
-      end
+    with :ok <- Settings.known_keys(g, @group_keys, name),
+         {:ok, groups} <- group_source(g, name) do
+      group_account(g, groups, finding, name, context)
     end
   end
 
-  defp groups(_, name),
+  defp groups(_, _finding, name, _context), do: group_source(:bad, name)
+
+  defp group_source(%{from: from}, _name) when from in [:member_of, "member_of"],
+    do: {:ok, %{from: :member_of}}
+
+  defp group_source(%{base_dn: base} = g, name) when is_binary(base) and base != "" do
+    attr = Map.get(g, :member_attr, "member")
+
+    if attr in ~w(member uniqueMember memberUid),
+      do: {:ok, %{from: :search, base_dn: base, member_attr: attr}},
+      else:
+        Settings.fail(name, :"groups.member_attr", "must be member, uniqueMember or memberUid")
+  end
+
+  defp group_source(_, name),
     do:
       Settings.fail(
         name,
         :groups,
         "must be %{from: :member_of} or %{base_dn: …, member_attr: …}"
       )
+
+  # The service account is for a group search after a direct bind: memberOf
+  # is read from the user's own entry, and search mode already reads the
+  # groups as search.bind_dn.
+  defp group_account(g, groups, finding, name, context) do
+    account? = Map.has_key?(g, :bind_dn) or Map.has_key?(g, :bind_password)
+
+    cond do
+      not account? and groups.from == :search ->
+        {:ok, Map.put(groups, :bind_dn, nil), nil}
+
+      not account? ->
+        {:ok, groups, nil}
+
+      groups.from == :member_of ->
+        Settings.fail(
+          name,
+          :"groups.bind_dn",
+          "and bind_password can't be used with from: :member_of (memberOf is read from the user's own entry)"
+        )
+
+      finding.search != nil ->
+        Settings.fail(
+          name,
+          :"groups.bind_dn",
+          "is for a direct bind (user_dn_template): search mode reads the groups as search.bind_dn"
+        )
+
+      true ->
+        with {:ok, password} <- bind_password(g, :"groups.bind_password", name, context) do
+          case {g[:bind_dn], password} do
+            {dn, pw} when is_binary(dn) and dn != "" and is_binary(pw) ->
+              {:ok, Map.put(groups, :bind_dn, dn), pw}
+
+            _ ->
+              Settings.fail(name, :"groups.bind_dn", "and bind_password must be set together")
+          end
+        end
+    end
+  end
 
   defp mapping(map, name) when is_map(map) do
     Enum.reduce_while(map, {:ok, []}, fn {group, roles}, {:ok, acc} ->

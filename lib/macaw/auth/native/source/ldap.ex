@@ -12,6 +12,10 @@ defmodule Macaw.Auth.Native.Source.Ldap do
         required_group: "macaw", role_mapping: %{"macaw-admin" => "admin"},
         default_role: "viewer"}
 
+  A directory that lets a user read only their own entry gives the group
+  search a service account: `groups: %{base_dn: …, member_attr: …,
+  bind_dn: "cn=svc,dc=example,dc=test", bind_password: {:env, "LDAP_PW"}}`.
+
   The flow, each failure its own reason (`explain/1`), for the log and
   `mix macaw_auth.ldap.check`, never for the visitor:
 
@@ -26,14 +30,15 @@ defmodule Macaw.Auth.Native.Source.Ldap do
      built with the username as data (`Macaw.Auth.Native.Source.Ldap.Filter`)
      (`:search_failed`, `:user_not_found`, `:ambiguous_user`).
   4. Bind as that DN with the password (`:invalid_credentials`).
-  5. Read the attributes, then the groups (`:group_search_failed`).
+  5. Read the attributes, then the groups, binding first as the service
+     account when there is one (`:group_search_failed`).
   6. Apply `required_group` (`:not_in_group`) and derive the roles
      (`:no_role`); the directory's username must be a valid one
      (`:invalid_username`).
 
   Every value sent to `:eldap` (DN, password, filter value) goes as its
   UTF-8 bytes, so a non-ASCII password binds as the directory stored it.
-  Passwords are never logged; a directory that can't be reached or
+  Passwords (the user's and the service account's) are never logged; a directory that can't be reached or
   searched is logged as a warning, naming the source.
 
   **Whether it knows the user** (`knows?/2`): a directory that wasn't
@@ -173,7 +178,11 @@ defmodule Macaw.Auth.Native.Source.Ldap do
 
   def explain(:user_not_found), do: "no entry matched the username"
   def explain(:ambiguous_user), do: "more than one entry matched the username"
-  def explain(:group_search_failed), do: "the group search failed"
+
+  def explain(:group_search_failed),
+    do:
+      "the group search failed: the service bind was refused, or the directory refused the search"
+
   def explain(:not_in_group), do: "the user is not in the required group"
 
   def explain(:no_role),
@@ -266,7 +275,7 @@ defmodule Macaw.Auth.Native.Source.Ldap do
     # username is data in the term, so it can't make the filter malformed.
     {:ok, filter} = Filter.build(search.filter, username)
 
-    with :ok <- service_bind(conn, source, :search_failed),
+    with :ok <- service_bind(conn, search.bind_dn, source, :search_failed),
          {:ok, entries} <- search(conn, source, search.base_dn, filter, ["dn"], :search_failed) do
       case entries do
         [] -> {:error, :user_not_found}
@@ -276,10 +285,11 @@ defmodule Macaw.Auth.Native.Source.Ldap do
     end
   end
 
-  defp service_bind(_conn, %{search: %{bind_dn: nil}}, _reason), do: :ok
+  # The source's one service account: the search's, or the groups'.
+  defp service_bind(_conn, nil, _source, _reason), do: :ok
 
-  defp service_bind(conn, %{search: search} = source, reason) do
-    case :eldap.simple_bind(conn, bytes(search.bind_dn), bytes(source.bind_password)) do
+  defp service_bind(conn, bind_dn, source, reason) do
+    case :eldap.simple_bind(conn, bytes(bind_dn), bytes(source.bind_password)) do
       :ok -> :ok
       {:error, _} -> {:error, warn(source, reason)}
     end
@@ -326,15 +336,28 @@ defmodule Macaw.Auth.Native.Source.Ldap do
   defp groups(_conn, %{groups: %{from: :member_of}}, _dn, entry),
     do: {:ok, for(dn <- Map.get(entry, "memberof", []), do: %{dn: dn, cn: cn(dn)})}
 
+  defp groups(conn, source, dn, entry) do
+    with :ok <- group_bind(conn, source), do: search_groups(conn, source, dn, entry)
+  end
+
+  # Search mode re-binds as its service account to read the groups; a
+  # direct bind as the groups' account when it has one, else the user's own
+  # bind reads them.
+  defp group_bind(conn, %{search: %{bind_dn: bind_dn}} = source),
+    do: service_bind(conn, bind_dn, source, :group_search_failed)
+
+  defp group_bind(conn, %{groups: %{from: :search, bind_dn: bind_dn}} = source),
+    do: service_bind(conn, bind_dn, source, :group_search_failed)
+
+  defp group_bind(_conn, _source), do: :ok
+
   # posixGroup's memberUid holds the uid as the directory spells it;
   # groupOfNames' member holds the DN.
-  defp groups(conn, %{groups: %{base_dn: base, member_attr: attr}} = source, dn, entry) do
+  defp search_groups(conn, %{groups: %{base_dn: base, member_attr: attr}} = source, dn, entry) do
     value = if attr == "memberUid", do: first(entry, source.username_attr) || "", else: dn
     filter = :eldap.equalityMatch(String.to_charlist(attr), bytes(value))
 
-    # Search mode re-binds as the service account to read the groups.
-    with :ok <- if(source.search, do: service_bind(conn, source, :group_search_failed), else: :ok),
-         {:ok, entries} <- search(conn, source, base, filter, ["cn"], :group_search_failed) do
+    with {:ok, entries} <- search(conn, source, base, filter, ["cn"], :group_search_failed) do
       {:ok,
        for {gdn, attrs} <- entries do
          %{dn: gdn, cn: List.first(Map.get(attrs, "cn", [])) || cn(gdn)}
@@ -398,8 +421,9 @@ defmodule Macaw.Auth.Native.Source.Ldap do
   Runs the sign-in flow for `username` without signing in, and says how
   each step went: `[{step, :ok | :error, detail}]`, ending at the first
   failure. The steps: connect, TLS, find the user's DN (the search), bind,
-  read attributes, username, groups, required group, roles. The password
-  is used for the bind and appears nowhere in the result.
+  read attributes, username, the bind for the groups (a direct bind with a
+  groups account only), groups, required group, roles. The passwords, the
+  user's and the service account's, appear nowhere in the result.
   """
   @spec diagnose(t(), String.t(), String.t() | nil) :: [{String.t(), :ok | :error, String.t()}]
   def diagnose(_source, _username, password) when password in [nil, ""],
@@ -442,7 +466,7 @@ defmodule Macaw.Auth.Native.Source.Ldap do
   end
 
   defp diagnosed(conn, source, username, password) do
-    [
+    user_steps = [
       {"find the user's DN", :dn, fn _ -> find_dn(conn, source, username) end,
        &"#{finding(source, username)}: DN #{&1}"},
       {"bind as the user", :bound,
@@ -450,15 +474,18 @@ defmodule Macaw.Auth.Native.Source.Ldap do
        fn _ -> "the password was accepted" end},
       {"read attributes", :entry, fn s -> read_entry(conn, source, s.dn) end,
        &describe_entry(source, &1)},
-      {"username", :username, fn s -> username(source, s.entry) end, &"#{&1}"},
-      {"groups", :groups, fn s -> groups(conn, source, s.dn, s.entry) end,
-       &if(&1 == [], do: "none", else: Enum.map_join(&1, ", ", fn g -> g.cn || g.dn end))},
+      {"username", :username, fn s -> username(source, s.entry) end, &"#{&1}"}
+    ]
+
+    access_steps = [
       {"required group", :required,
        fn s ->
          with :ok <- required_group(source, s.groups), do: {:ok, source.required_group}
        end, &if(&1, do: "member of #{&1}", else: "none required")},
       {"roles", :roles, fn s -> roles(source, s.groups) end, &Enum.join(&1, ", ")}
     ]
+
+    (user_steps ++ group_steps(conn, source) ++ access_steps)
     |> Enum.reduce_while({[], %{}}, fn {label, key, run, describe}, {acc, state} ->
       case run.(state) do
         {:ok, value} ->
@@ -471,6 +498,26 @@ defmodule Macaw.Auth.Native.Source.Ldap do
     |> elem(0)
     |> Enum.reverse()
   end
+
+  # A direct bind's groups account is a step of its own, before the groups
+  # are read with it.
+  defp group_steps(conn, %{search: nil, groups: %{from: :search, bind_dn: bind_dn}} = source)
+       when is_binary(bind_dn) do
+    [
+      {"bind for the groups", :group_bind,
+       fn _ -> with(:ok <- group_bind(conn, source), do: {:ok, bind_dn}) end, &"bound as #{&1}"},
+      {"groups", :groups, fn s -> search_groups(conn, source, s.dn, s.entry) end,
+       &describe_groups/1}
+    ]
+  end
+
+  defp group_steps(conn, source),
+    do: [
+      {"groups", :groups, fn s -> groups(conn, source, s.dn, s.entry) end, &describe_groups/1}
+    ]
+
+  defp describe_groups([]), do: "none"
+  defp describe_groups(groups), do: Enum.map_join(groups, ", ", fn g -> g.cn || g.dn end)
 
   defp finding(%{user_dn_template: t}, _username) when is_binary(t), do: "direct bind"
 

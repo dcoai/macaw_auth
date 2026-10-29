@@ -61,6 +61,78 @@ defmodule Macaw.Auth.Native.Source.Ldap.OfflineTest do
              search(%{base_dn: "dc=x"}, %{allow_anonymous_search: true})
   end
 
+  @tag verifies: "ldap-group-account-config"
+  test "a groups service account: direct bind and a group search only, set together, a secret" do
+    groups = %{base_dn: "cn=g", bind_dn: "cn=svc", bind_password: "hunter2-groups"}
+
+    assert {:ok,
+            %Ldap{
+              groups: %{from: :search, base_dn: "cn=g", member_attr: "member", bind_dn: "cn=svc"},
+              bind_password: "hunter2-groups",
+              search: nil
+            } = source} = parse(%{groups: groups})
+
+    refute inspect(source) =~ "hunter2"
+
+    # Without one, as before: no account, no password.
+    assert {:ok, %Ldap{groups: %{bind_dn: nil}, bind_password: nil}} =
+             parse(%{groups: %{base_dn: "cn=g"}})
+
+    # String keys, and the password a reference resolved when read.
+    assert {:ok, %Ldap{groups: %{bind_dn: "cn=svc"}, bind_password: "hunter2-groups"}} =
+             parse(%{
+               groups: %{
+                 "base_dn" => "cn=g",
+                 "bind_dn" => "cn=svc",
+                 "bind_password" => "hunter2-groups"
+               }
+             })
+
+    assert {:ok, %Ldap{bind_password: "from env"}} =
+             @nas
+             |> Map.put(:groups, %{groups | bind_password: {:env, "GROUPS_PW"}})
+             |> Ldap.parse(env: %{"GROUPS_PW" => "from env"})
+
+    assert error(%{groups: %{groups | bind_password: {:env, "GROUPS_PW"}}}) ==
+             "sources[nas].groups.bind_password: the environment variable GROUPS_PW is not set"
+
+    assert error(%{groups: %{groups | bind_password: 7}}) ==
+             ~s(sources[nas].groups.bind_password: must be a string, {:env, "VAR"} or {:file, "/path"})
+
+    # memberOf is the user's own entry: no account reads it.
+    for half <- [%{bind_dn: "cn=svc"}, %{bind_password: "hunter2-groups"}, groups] do
+      assert error(%{groups: half |> Map.delete(:base_dn) |> Map.put(:from, :member_of)}) ==
+               "sources[nas].groups.bind_dn: and bind_password can't be used with from: :member_of (memberOf is read from the user's own entry)"
+    end
+
+    # Search mode reads the groups as its own service account.
+    assert search(
+             %{base_dn: "dc=x", bind_dn: "cn=finder", bind_password: "pw"},
+             %{groups: groups}
+           ) ==
+             {:error,
+              "sources[nas].groups.bind_dn: is for a direct bind (user_dn_template): search mode reads the groups as search.bind_dn"}
+
+    for half <- [
+          %{base_dn: "cn=g", bind_dn: "cn=svc"},
+          %{base_dn: "cn=g", bind_password: "hunter2-groups"},
+          %{groups | bind_dn: ""}
+        ] do
+      assert error(%{groups: half}) ==
+               "sources[nas].groups.bind_dn: and bind_password must be set together"
+    end
+
+    # No fault holds the password.
+    for fault <- [
+          %{port: 0},
+          %{default_role: ""},
+          %{shade: 1},
+          %{groups: %{groups | bind_dn: ""}}
+        ] do
+      refute error(Map.put_new(fault, :groups, groups)) =~ "hunter2"
+    end
+  end
+
   @tag verifies: "ldap-member-match"
   test "a group matches by its DN or its CN, ignoring case" do
     groups = [%{dn: "cn=Admins,dc=x", cn: "Admins"}]
@@ -470,7 +542,8 @@ defmodule Macaw.Auth.Native.Source.Ldap.OfflineTest do
           "the search failed: the service bind was refused, or the directory refused the search",
         user_not_found: "no entry matched the username",
         ambiguous_user: "more than one entry matched the username",
-        group_search_failed: "the group search failed",
+        group_search_failed:
+          "the group search failed: the service bind was refused, or the directory refused the search",
         not_in_group: "the user is not in the required group",
         no_role: "no role_mapping matched the user's groups and there is no default_role",
         invalid_username:
