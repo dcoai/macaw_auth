@@ -125,7 +125,7 @@ through Macaw.Auth.revoke, a process subscribed to the user receives {:sessions_
 ## 6. Steps {#auth-sessions-steps}
 
 `Macaw.Auth.Native.Sessions.complete_step/3` records a step:
-- **`:second_factor` and `:second_factor_enroll`** set `second_factor_passed` true, by an update of the row;
+- **`:second_factor`** sets `second_factor_passed` true, by an update of the row (enrollment is no step: a user owing it has no session, [11 §3.2](11-native-totp.md#auth-totp-owed));
 - **any other step** (`:password_change`) joins `completed_steps`, **stored as its name** (a string), once.
 
 **Steps come back as atoms only by lookup** among `Macaw.Auth.steps/0`: a stored name that isn't one (a row from a later version) is dropped, never made an atom. `completed_steps` is `{:array, :string}`: a native array on Postgres, JSON text on SQLite.

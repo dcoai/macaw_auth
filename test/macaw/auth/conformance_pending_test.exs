@@ -1,6 +1,6 @@
 defmodule Macaw.Auth.PendingConformanceTest do
   # The kit, run against the in-memory backend with its second factor named
-  # pending, as a backend still being built would: the five tests that need
+  # pending, as a backend still being built would: the eight tests that need
   # it are skipped, visibly, and the other seventeen run.
   use Macaw.Auth.Conformance,
     backend: Macaw.Auth.Test.MemoryBackend,
@@ -14,10 +14,10 @@ defmodule Macaw.Auth.PendingConformanceTest do
   end
 
   @tag verifies: "kit-pending"
-  test "the five second-factor tests are skipped with the reason, and the other seventeen run" do
+  test "the eight second-factor tests are skipped with the reason, and the other seventeen run" do
     {skipped, run} = Enum.split_with(kit_tests(), & &1.tags[:skip])
 
-    assert length(skipped) == 5
+    assert length(skipped) == 8
     assert Enum.all?(skipped, &(&1.tags.skip == "pending (second factor): a reason"))
     assert length(run) == 17
   end

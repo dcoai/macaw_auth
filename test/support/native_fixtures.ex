@@ -73,11 +73,11 @@ defmodule Macaw.Auth.Test.NativeFixtures do
 
   @impl true
   def enroll_second_factor!(user) do
-    {:ok, %{secret: secret}} = Native.enroll_begin(user)
+    {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user)
     # The previous step's code (inside the ±1 window), so the current
     # step's is still unspent for the kit.
     previous = System.os_time(:second) - 30
-    {:ok, _codes} = Native.enroll_confirm(user, Totp.code(secret, previous))
+    {:ok, _codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, previous))
     fn -> Totp.code(secret, System.os_time(:second)) end
   end
 

@@ -274,6 +274,106 @@ defmodule Macaw.Auth.PlugTest do
     assert id == session.id
   end
 
+  describe "enrollment by ticket" do
+    # A browser that signed in as a user owing enrollment: its conn after
+    # log_in, and the next request, carrying that session.
+    defp ticketed(opts \\ []) do
+      {user, creds} = Mem.user!(%{second_factor: :required})
+
+      conn =
+        request("/login", %{"macaw_auth_return_to" => "/reports"})
+        |> AuthPlug.log_in(user, opts)
+
+      {user, creds, conn, request("/second-factor/enroll", get_session(conn))}
+    end
+
+    @tag verifies: "plug-log-in-ticket"
+    test "log_in of a user owing enrollment gives a ticket, no session, and goes to enroll" do
+      {user, _creds, conn, _next} = ticketed()
+
+      assert conn.halted
+      assert location(conn) == "/second-factor/enroll"
+      assert conn.private[:plug_session_info] == :renew
+      assert is_binary(get_session(conn, "macaw_auth_enrollment_ticket"))
+      assert get_session(conn, "macaw_auth_return_to") == "/reports"
+      assert get_session(conn, AuthPlug.token_key()) == nil
+      assert get_session(conn, "live_socket_id") == nil
+      assert {conn.assigns.current_user, conn.assigns.current_session} == {nil, nil}
+      assert Auth.list_sessions(user.id) == []
+
+      # An older session's remember cookie doesn't outlive this sign-in.
+      {other, _} = Mem.user!(%{})
+      remembered = request("/login") |> AuthPlug.log_in(other, remember: true)
+
+      again =
+        conn(:post, "/login")
+        |> with_secret()
+        |> recycle_cookies(remembered)
+        |> init_test_session(%{})
+        |> AuthPlug.log_in(user)
+
+      assert again.resp_cookies[@remember].max_age == 0
+    end
+
+    @tag verifies: "plug-enrollment"
+    test "enrollment/1 shows the session's ticket; with none, or a refused one, :invalid_ticket" do
+      {_user, _creds, _conn, next} = ticketed()
+      assert {:ok, %{secret: secret, uri: "otpauth://totp/" <> _}} = AuthPlug.enrollment(next)
+      assert is_binary(secret)
+
+      assert AuthPlug.enrollment(request("/second-factor/enroll")) == {:error, :invalid_ticket}
+
+      tampered = request("/second-factor/enroll", %{"macaw_auth_enrollment_ticket" => "x"})
+      assert AuthPlug.enrollment(tampered) == {:error, :invalid_ticket}
+    end
+
+    @tag verifies: "plug-enroll-ok"
+    test "enroll_second_factor/2 with a valid code starts the session only then, unredirected" do
+      {user, _creds, _conn, next} = ticketed(remember: true)
+      {:ok, %{secret: secret}} = AuthPlug.enrollment(next)
+      assert Auth.list_sessions(user.id) == []
+
+      assert {:ok, codes, conn} =
+               AuthPlug.enroll_second_factor(next, NimbleTOTP.verification_code(secret))
+
+      assert is_list(codes)
+      refute conn.halted
+      assert conn.private[:plug_session_info] == :renew
+      assert get_session(conn, "macaw_auth_enrollment_ticket") == nil
+      assert get_session(conn, "macaw_auth_return_to") == "/reports"
+      token = get_session(conn, AuthPlug.token_key())
+
+      assert {:ok, %Auth.User{second_factor: :enrolled}, %{second_factor_passed: true} = session} =
+               Auth.fetch(token)
+
+      assert get_session(conn, "live_socket_id") == Auth.live_socket_id(session.id)
+      assert conn.assigns.current_user.second_factor == :enrolled
+      assert conn.assigns.pending_step == nil
+      # Remembered as sign-in asked.
+      assert conn.resp_cookies[@remember].max_age == Mem.idle_seconds()
+
+      # The page's next step goes where the browser was going.
+      assert conn |> AuthPlug.continue() |> location() == "/reports"
+    end
+
+    @tag verifies: "plug-enroll-refused"
+    test "enroll_second_factor/2 refused: a wrong code keeps the ticket, a refused ticket is dropped" do
+      {user, _creds, _conn, next} = ticketed()
+
+      assert {:error, :invalid_code, conn} = AuthPlug.enroll_second_factor(next, "000000")
+      refute conn.halted
+      assert is_binary(get_session(conn, "macaw_auth_enrollment_ticket"))
+
+      tampered = request("/second-factor/enroll", %{"macaw_auth_enrollment_ticket" => "x"})
+      assert {:error, :invalid_ticket, conn} = AuthPlug.enroll_second_factor(tampered, "000000")
+      assert get_session(conn, "macaw_auth_enrollment_ticket") == nil
+
+      none = request("/second-factor/enroll")
+      assert {:error, :invalid_ticket, ^none} = AuthPlug.enroll_second_factor(none, "000000")
+      assert Auth.list_sessions(user.id) == []
+    end
+  end
+
   describe "the remember cookie" do
     @tag verifies: "plug-remember-cookie"
     test "log_in with remember: true sets a signed cookie for the idle limit, http only, Lax" do

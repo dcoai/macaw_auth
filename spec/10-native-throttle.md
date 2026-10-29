@@ -90,7 +90,7 @@ five failures from 192.0.2.9 at other names: lee is throttled from it at 0; sign
 
 ## 4. The second factor's key {#auth-throttle-second-factor}
 
-Code attempts (`Macaw.Auth.Native.verify_second_factor/3`, `enroll_confirm/3`, `disable/3`, [11](11-native-totp.md)) go through the same throttle: refused unchecked (`{:error, :throttled}`) while a key waits; **a wrong code is a failure,** with the same backoff as a wrong password, so six digits can't be guessed; an accepted code resets the user's key. Other refusals (an enrollment not started, a policy that requires one) are not counted.
+Code attempts (`Macaw.Auth.Native.verify_second_factor/3`, `enroll_second_factor/3` and `enroll_confirm/4`, the enrollment ticket's account's, `disable/3`, [11](11-native-totp.md)) go through the same throttle: refused unchecked (`{:error, :throttled}`) while a key waits; **a wrong code is a failure,** with the same backoff as a wrong password, so six digits can't be guessed; an accepted code resets the user's key. Other refusals (an enrollment ticket refused, which is checked before any code, or a policy that requires one) are not counted.
 
 - **The user key is the second factor's own,** `{:second_factor, id}`, the account's id. On the sign-in key, every correct password would reset the count and grant a guesser who has the password five more free guesses at the code.
 - **The address key is the one sign-in uses,** so code failures from an address slow sign-ins from it, and the reverse.
@@ -106,7 +106,7 @@ wrong codes from 192.0.2.8 for five different users: a sixth user's right code f
 ```
 
 ```test:throttle-code-enroll
-five wrong confirmation codes: enroll_confirm with the right code is {:error, :throttled}
+five wrong confirmation codes on a ticket: enroll_confirm with the right code is {:error, :throttled}
 ```
 
 ## 5. A block takes a hash's time {#auth-throttle-timing}

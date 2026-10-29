@@ -260,13 +260,13 @@ defmodule Macaw.Auth.Native.Sessions do
   end
 
   @doc """
-  Records a completed step: `:second_factor` and `:second_factor_enroll`
-  mark the second factor passed; any other step joins `completed_steps`.
-  A session that doesn't exist, or was deleted meanwhile (a revocation
-  racing the step), is left gone and refused: `{:error, :invalid}`.
+  Records a completed step: `:second_factor` marks the second factor
+  passed; any other step joins `completed_steps`. A session that doesn't
+  exist, or was deleted meanwhile (a revocation racing the step), is left
+  gone and refused: `{:error, :invalid}`.
   """
   @spec complete_step(term(), Auth.step(), keyword()) :: :ok | {:error, :invalid}
-  def complete_step(id, step, opts) when step in [:second_factor, :second_factor_enroll] do
+  def complete_step(id, :second_factor, opts) do
     %Config{repo: repo} = Config.get()
 
     with {:ok, id} <- Ecto.UUID.cast(id),

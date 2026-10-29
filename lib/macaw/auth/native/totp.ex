@@ -5,8 +5,8 @@ defmodule Macaw.Auth.Native.Totp do
   `macaw_auth_users` row and in `macaw_auth_recovery_codes`.
 
   Call these through `Macaw.Auth.Native` (`verify_second_factor/3`,
-  `enroll_confirm/3`, `disable/3`), which puts every code check behind the
-  throttle; the functions here don't throttle.
+  `enroll_second_factor/3`, `enroll_confirm/4`, `disable/3`), which puts
+  every code check behind the throttle; the functions here don't throttle.
 
   - **RFC 6238**, through `NimbleTOTP`: SHA-1, six digits, 30-second
     steps; a 160-bit (20-byte) random secret; a code is accepted for the
@@ -20,11 +20,15 @@ defmodule Macaw.Auth.Native.Totp do
     is refused. Codes are compared with `Plug.Crypto.secure_compare/2`.
   - **The secret is sealed** (`Macaw.Auth.Native.Seal`, AES-256-GCM under
     the configured `sealing_key`, bound to the user's id). It leaves this
-    module only from `enroll_begin/2`, for the enrollment page's QR code.
-  - **Enrollment is pending until confirmed.** `enroll_begin/2` stores a
-    sealed secret with `totp_enabled_at` nil, and returns the same secret
-    on a reload; `enroll_confirm/3` with a valid code enables it and
-    returns ten recovery codes, shown once.
+    module only from `enroll_begin/3` and `enrollment/2`, for the
+    enrollment page's QR code.
+  - **Nothing unconfirmed is stored.** `enroll_begin/3` seals a fresh
+    secret into an enrollment ticket (`Macaw.Auth.Native.Ticket`), which
+    the client holds for ten minutes and which `enrollment/2` shows again
+    on a reload; `enroll_confirm/3` with a valid code writes the secret to
+    the row, enables it and returns ten recovery codes, shown once. A
+    ticket is spent by the enrollment it completes: the account is then
+    enrolled, and `open_ticket/3` refuses a ticket of an enrolled account.
   - **Recovery codes**: ten, each ten characters of an alphabet without
     look-alikes (no 0, O, 1 or I), shown in two groups of five
     (`ABCDE-FGHJK`), stored only as SHA-256, each spent by deleting its
@@ -44,7 +48,7 @@ defmodule Macaw.Auth.Native.Totp do
 
   import Ecto.Query
 
-  alias Macaw.Auth.Native.{Config, RecoveryCodeRecord, Seal, Sessions, UserRecord}
+  alias Macaw.Auth.Native.{Config, RecoveryCodeRecord, Seal, Sessions, Ticket, UserRecord}
   alias Macaw.Auth.User
 
   @step 30
@@ -86,46 +90,82 @@ defmodule Macaw.Auth.Native.Totp do
   # ── Enrollment ────────────────────────────────────────────────────────
 
   @doc """
-  Starts, or resumes, enrollment: `{:ok, %{secret: binary, uri: otpauth}}`
-  (the URI for a QR code, its label `issuer:username`), or
-  `{:error, :already_enrolled | :not_found}`. Not yet active: a pending
-  enrollment changes nothing at sign-in until `enroll_confirm/3`. A
-  pending secret is kept, so a reload shows the same code.
+  Begins an enrollment: a fresh secret, sealed into a ticket
+  (`Macaw.Auth.Native.Ticket`) and **stored nowhere**:
+  `{:ok, %{ticket: binary, secret: binary, uri: otpauth}}` (the URI for a
+  QR code, its label `issuer:username`). Nothing changes at sign-in, or
+  in any table, until `enroll_confirm/3`; a reload shows the ticket's
+  secret again (`enrollment/2`).
+
+  `purpose` is `:owed` (an account that owes enrollment at sign-in: it
+  must be enabled and `:required`, else `{:error, :not_required}`) or
+  `:chosen` (a user choosing to enroll). Otherwise `{:error, :not_found |
+  :disabled | :already_enrolled}`.
   """
-  @spec enroll_begin(user(), keyword()) ::
-          {:ok, %{secret: binary(), uri: String.t()}} | {:error, :already_enrolled | :not_found}
-  def enroll_begin(user, _opts \\ []), do: enroll_begin(Config.get(), user, true)
+  @spec enroll_begin(user(), Ticket.purpose(), keyword()) ::
+          {:ok, %{ticket: binary(), secret: binary(), uri: String.t()}}
+          | {:error, :not_found | :disabled | :already_enrolled | :not_required}
+  def enroll_begin(user, purpose, opts \\ []) when purpose in [:owed, :chosen] do
+    config = Config.get()
 
-  defp enroll_begin(config, user, retry) do
-    case load(config, user) do
-      nil ->
-        {:error, :not_found}
+    with {:ok, record} <- eligible(config, load(config, user), purpose) do
+      key = Seal.key!(config.sealing_key)
+      secret = NimbleTOTP.secret(20)
+      sealed = Seal.seal(secret, key, aad(record.id))
+      ticket = Ticket.issue(key, purpose, record.id, sealed, now(opts))
+      event(:enrollment_started, record.id)
+      {:ok, Map.put(enrollment(config, record, secret), :ticket, ticket)}
+    end
+  end
 
-      %UserRecord{totp_enabled_at: %DateTime{}} ->
-        {:error, :already_enrolled}
+  # Who may hold a ticket: an enabled account not enrolled, and for one
+  # owed at sign-in, one that policy still requires to enroll.
+  defp eligible(_config, nil, _purpose), do: {:error, :not_found}
+  defp eligible(_config, %UserRecord{disabled_at: %DateTime{}}, _purpose), do: {:error, :disabled}
 
-      %UserRecord{totp_secret_sealed: sealed} = record when is_binary(sealed) ->
-        {:ok, enrollment(config, record, unseal!(config, record))}
+  defp eligible(_config, %UserRecord{totp_enabled_at: %DateTime{}}, _purpose),
+    do: {:error, :already_enrolled}
 
-      %UserRecord{} = record ->
-        secret = NimbleTOTP.secret(20)
-        sealed = Seal.seal(secret, Seal.key!(config.sealing_key), aad(record.id))
+  defp eligible(config, record, :owed),
+    do: if(required?(record, config), do: {:ok, record}, else: {:error, :not_required})
 
-        # Conditional: of two first loads at once, one secret is kept, and
-        # the other caller is shown it.
-        query = where(UserRecord, [u], u.id == ^record.id and is_nil(u.totp_secret_sealed))
+  defp eligible(_config, record, :chosen), do: {:ok, record}
 
-        case config.repo.update_all(query, set: [totp_secret_sealed: sealed]) do
-          {1, _} ->
-            event(:enrollment_started, record.id)
-            {:ok, enrollment(config, record, secret)}
+  @doc """
+  Opens a ticket whose purpose is one of `purposes`: `{:ok, ticket,
+  record}`, the ticket's term and its account's row, or
+  `{:error, :invalid_ticket}` for one tampered, expired, of another
+  purpose, or whose account is gone, disabled, enrolled since (a ticket is
+  spent by the enrollment it completes) or, for `:owed`, no longer
+  required to enroll. Option `:now`.
+  """
+  @spec open_ticket(term(), [Ticket.purpose()], keyword()) ::
+          {:ok, Ticket.t(), UserRecord.t()} | {:error, :invalid_ticket}
+  def open_ticket(ticket, purposes, opts \\ []) do
+    config = Config.get()
 
-          {0, _} when retry ->
-            enroll_begin(config, record.id, false)
+    with {:ok, %{purpose: purpose} = term} <-
+           Ticket.open(Seal.key!(config.sealing_key), ticket, now(opts)),
+         true <- purpose in purposes,
+         {:ok, record} <- eligible(config, load(config, term.account_id), purpose) do
+      {:ok, term, record}
+    else
+      _refused -> {:error, :invalid_ticket}
+    end
+  end
 
-          {0, _} ->
-            {:error, :not_found}
-        end
+  @doc """
+  What an enrollment page shows of a ticket of either purpose:
+  `{:ok, %{secret, uri}}`, or `{:error, :invalid_ticket}` as
+  `open_ticket/3` refuses one. Option `:now`.
+  """
+  @spec enrollment(term(), keyword()) ::
+          {:ok, %{secret: binary(), uri: String.t()}} | {:error, :invalid_ticket}
+  def enrollment(ticket, opts \\ []) do
+    config = Config.get()
+
+    with {:ok, term, record} <- open_ticket(ticket, [:owed, :chosen], opts) do
+      {:ok, enrollment(config, record, unseal!(config, record.id, term.secret))}
     end
   end
 
@@ -135,45 +175,43 @@ defmodule Macaw.Auth.Native.Totp do
   end
 
   @doc """
-  Confirms a pending enrollment with a valid code: `{:ok, recovery_codes}`
-  (shown once; never retrievable again), or `{:error, :invalid_code |
-  :not_started | :already_enrolled}`. The confirming code's step is
-  recorded, so it can't then be used to sign in.
+  Confirms an opened ticket (`open_ticket/3`) with a valid code for its
+  secret: `{:ok, recovery_codes}` (shown once; never retrievable again),
+  the ticket's sealed secret written to the row with `totp_enabled_at`
+  and the code's step, so the confirming code can't then sign in. Or
+  `{:error, :invalid_code}`, or `{:error, :invalid_ticket}` when the
+  account was enrolled or disabled meanwhile: the write is conditional on
+  neither, so of two confirmations of one ticket racing, one enrolls.
   """
-  @spec enroll_confirm(user(), String.t(), keyword()) ::
-          {:ok, [String.t()]} | {:error, :invalid_code | :not_started | :already_enrolled}
-  def enroll_confirm(user, code, opts \\ []) do
-    %Config{repo: repo} = config = Config.get()
+  @spec enroll_confirm({Ticket.t(), UserRecord.t()}, term(), keyword()) ::
+          {:ok, [String.t()]} | {:error, :invalid_code | :invalid_ticket}
+  def enroll_confirm({%{secret: sealed}, %UserRecord{} = record}, code, opts \\ []) do
+    config = Config.get()
 
-    case load(config, user) do
-      %UserRecord{totp_enabled_at: %DateTime{}} ->
-        {:error, :already_enrolled}
-
-      %UserRecord{totp_secret_sealed: sealed} = record when is_binary(sealed) ->
-        with {:ok, step} <- matching_step(unseal!(config, record), totp(code), now(opts), nil) do
-          confirm(repo, record, sealed, step, opts)
-        end
-
-      _none ->
-        {:error, :not_started}
+    with {:ok, step} <-
+           matching_step(unseal!(config, record.id, sealed), totp(code), now(opts), nil) do
+      confirm(config.repo, record, sealed, step, opts)
     end
   end
 
   defp confirm(repo, record, sealed, step, opts) do
-    # Conditional on the secret the code was checked against: an enrollment
-    # restarted meanwhile (admin_reset, then enroll_begin) isn't confirmed
-    # by a code for the old secret.
     query =
       where(
         UserRecord,
         [u],
-        u.id == ^record.id and is_nil(u.totp_enabled_at) and u.totp_secret_sealed == ^sealed
+        u.id == ^record.id and is_nil(u.totp_enabled_at) and is_nil(u.disabled_at)
       )
 
     repo.transaction(fn ->
-      case repo.update_all(query, set: [totp_enabled_at: timestamp(opts), totp_last_step: step]) do
+      case repo.update_all(query,
+             set: [
+               totp_secret_sealed: sealed,
+               totp_enabled_at: timestamp(opts),
+               totp_last_step: step
+             ]
+           ) do
         {1, _} -> replace_recovery_codes(repo, record.id, opts)
-        {0, _} -> repo.rollback(:not_started)
+        {0, _} -> repo.rollback(:invalid_ticket)
       end
     end)
     |> case do
@@ -181,8 +219,8 @@ defmodule Macaw.Auth.Native.Totp do
         event(:enrolled, record.id)
         {:ok, codes}
 
-      {:error, :not_started} ->
-        {:error, :not_started}
+      {:error, :invalid_ticket} ->
+        {:error, :invalid_ticket}
     end
   end
 
@@ -217,7 +255,12 @@ defmodule Macaw.Auth.Native.Totp do
 
   defp verify_totp(config, record, code, now) do
     with {:ok, step} <-
-           matching_step(unseal!(config, record), code, now, record.totp_last_step),
+           matching_step(
+             unseal!(config, record.id, record.totp_secret_sealed),
+             code,
+             now,
+             record.totp_last_step
+           ),
          :ok <- claim_step(config.repo, record.id, step) do
       :ok
     else
@@ -405,8 +448,8 @@ defmodule Macaw.Auth.Native.Totp do
   end
 
   @doc """
-  An administrator clears a user's second factor (a lost device), enrolled
-  or pending, and revokes every session of theirs
+  An administrator clears a user's second factor (a lost device) and
+  revokes every session of theirs
   (`Macaw.Auth.Native.Sessions.revoke_all/3`, so their open pages
   disconnect): they sign in again, and enroll again if policy requires.
   `:ok`. Option `:announce` (default `true`): `false` revokes without
@@ -459,8 +502,8 @@ defmodule Macaw.Auth.Native.Totp do
   # A secret that doesn't unseal is an operator's fault (the key changed),
   # not a wrong code: raised, naming it, so it is seen rather than every
   # enrolled user being silently refused.
-  defp unseal!(config, record) do
-    case Seal.unseal(record.totp_secret_sealed, Seal.key!(config.sealing_key), aad(record.id)) do
+  defp unseal!(config, user_id, sealed) do
+    case Seal.unseal(sealed, Seal.key!(config.sealing_key), aad(user_id)) do
       {:ok, secret} ->
         secret
 

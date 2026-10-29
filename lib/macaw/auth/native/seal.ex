@@ -1,9 +1,10 @@
 defmodule Macaw.Auth.Native.Seal do
   @moduledoc """
-  Sealing at rest: what the native backend stores that must not be read
-  back from the table (a TOTP secret) is sealed with AES-256-GCM, OTP's
-  `:crypto`, under a key from the configuration (`sealing_key:`,
-  `Macaw.Auth.Native.Config`).
+  Sealing: what the native backend stores that must not be read back from
+  the table (a TOTP secret), and what it hands the client to bring back
+  (an enrollment ticket, `Macaw.Auth.Native.Ticket`), is sealed with
+  AES-256-GCM, OTP's `:crypto`, under a key from the configuration
+  (`sealing_key:`, `Macaw.Auth.Native.Config`).
 
   - **The key.** `sealing_key` is a binary of at least 32 bytes, or
     `{module, function, args}` returning one, called at each use (so a

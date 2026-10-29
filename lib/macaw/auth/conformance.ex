@@ -35,8 +35,11 @@ defmodule Macaw.Auth.Conformance do
   - a user with a second factor owes it, and completing the step clears it;
     a user enrolled through the fixture is reported `:enrolled`; a valid
     code passes the step (`Macaw.Auth.verify_second_factor/3`), a wrong
-    one doesn't, and **a code is accepted once**; a user whom policy
-    requires to have one owes enrollment;
+    one doesn't, and **a code is accepted once**;
+  - a user whom policy requires to have one **gets no session**, but an
+    enrollment ticket, and enrolls from the ticket alone; a ticket is
+    refused once expired (ten minutes, by `:now`), tampered, spent by the
+    enrollment it completed, or its account disabled;
   - the backend exports `check_config!/0`, the check the application
     makes at start, and it is `:ok` for the configuration the kit's tests
     run under.
@@ -308,16 +311,89 @@ defmodule Macaw.Auth.Conformance do
           assert Auth.pending_step(user, session) == :second_factor
         end
 
-        test "a user whom policy requires to have one owes enrollment" do
+        test "a user whom policy requires to have one gets no session, and enrolls from a ticket alone" do
           {user, creds} = @fixtures.user!(%{second_factor: :required})
           {:ok, user} = Auth.authenticate(creds)
           assert user.second_factor == :required
-          {:ok, token, session} = Auth.create_session(user)
-          assert Auth.pending_step(user, session) == :second_factor_enroll
+          assert Auth.create_session(user) == {:error, :enrollment_required}
 
-          :ok = Auth.complete_step(session.id, :second_factor_enroll)
-          {:ok, user, session} = Auth.fetch(token)
-          assert Auth.pending_step(user, session) == nil
+          assert Auth.create_session(user, second_factor_passed: true) ==
+                   {:error, :enrollment_required}
+
+          now = DateTime.utc_now()
+          {:ok, ticket} = Auth.enrollment_ticket(user, now: now)
+          assert is_binary(ticket)
+
+          assert {:ok, %{secret: secret, uri: "otpauth://totp/" <> _}} =
+                   Auth.enrollment(ticket, now: now)
+
+          assert Auth.enroll_second_factor(ticket, wrong(code(secret, now)), now: now) ==
+                   {:error, :invalid_code}
+
+          assert {:ok, %Auth.User{id: id, second_factor: :enrolled}, codes} =
+                   Auth.enroll_second_factor(ticket, code(secret, now), now: now)
+
+          assert id == user.id
+          assert is_list(codes)
+          assert Auth.list_sessions(user.id) == []
+          assert {:ok, %Auth.User{second_factor: :enrolled}} = Auth.authenticate(creds)
+        end
+
+        test "an expired or tampered enrollment ticket is refused" do
+          {user, _} = @fixtures.user!(%{second_factor: :required})
+          now = DateTime.utc_now()
+          {:ok, ticket} = Auth.enrollment_ticket(user, now: now)
+          {:ok, %{secret: secret}} = Auth.enrollment(ticket, now: now)
+
+          almost = DateTime.add(now, 599, :second)
+          late = DateTime.add(now, 600, :second)
+          assert {:ok, %{secret: ^secret}} = Auth.enrollment(ticket, now: almost)
+          assert Auth.enrollment(ticket, now: late) == {:error, :invalid_ticket}
+
+          assert Auth.enroll_second_factor(ticket, code(secret, late), now: late) ==
+                   {:error, :invalid_ticket}
+
+          for refused <- [tampered(ticket), :crypto.strong_rand_bytes(64), "", nil] do
+            assert Auth.enrollment(refused, now: now) == {:error, :invalid_ticket}
+
+            assert Auth.enroll_second_factor(refused, code(secret, now), now: now) ==
+                     {:error, :invalid_ticket}
+          end
+
+          assert {:ok, _user, _codes} =
+                   Auth.enroll_second_factor(ticket, code(secret, now), now: now)
+        end
+
+        test "an enrollment ticket is spent by the enrollment it completes" do
+          {user, _} = @fixtures.user!(%{second_factor: :required})
+          now = DateTime.utc_now()
+          {:ok, ticket} = Auth.enrollment_ticket(user, now: now)
+          {:ok, %{secret: secret}} = Auth.enrollment(ticket, now: now)
+          {:ok, _user, _codes} = Auth.enroll_second_factor(ticket, code(secret, now), now: now)
+
+          next = DateTime.add(now, 30, :second)
+          assert Auth.enrollment(ticket, now: next) == {:error, :invalid_ticket}
+
+          assert Auth.enroll_second_factor(ticket, code(secret, next), now: next) ==
+                   {:error, :invalid_ticket}
+
+          # The account is enrolled now: no further ticket is issued for it.
+          assert {:error, _} = Auth.enrollment_ticket(user, now: next)
+        end
+
+        test "an enrollment ticket of an account disabled during its lifetime is refused" do
+          {user, _} = @fixtures.user!(%{second_factor: :required})
+          now = DateTime.utc_now()
+          {:ok, ticket} = Auth.enrollment_ticket(user, now: now)
+          {:ok, %{secret: secret}} = Auth.enrollment(ticket, now: now)
+          :ok = @fixtures.disable!(user)
+
+          assert Auth.enrollment(ticket, now: now) == {:error, :invalid_ticket}
+
+          assert Auth.enroll_second_factor(ticket, code(secret, now), now: now) ==
+                   {:error, :invalid_ticket}
+
+          assert {:error, _} = Auth.enrollment_ticket(user, now: now)
         end
       end
 
@@ -332,6 +408,16 @@ defmodule Macaw.Auth.Conformance do
       # Every digit changed, so the code differs from the valid one.
       defp wrong(code),
         do: for(<<d <- code>>, into: "", do: <<?0 + rem(d - ?0 + 5, 10)>>)
+
+      # A ticket's secret is TOTP (RFC 6238, 30 s, six digits): its code at `time`.
+      defp code(secret, time), do: NimbleTOTP.verification_code(secret, time: time)
+
+      # The last byte flipped: a ticket that no longer authenticates.
+      defp tampered(ticket) do
+        size = byte_size(ticket) - 1
+        <<head::binary-size(^size), last>> = ticket
+        <<head::binary, Bitwise.bxor(last, 1)>>
+      end
     end
   end
 end

@@ -8,18 +8,28 @@ defmodule Macaw.Auth.Test.MemoryBackend do
   guard as the native backend's: the last accepted step is replaced only
   by a later one, atomically (`:ets.select_replace/2`). No throttle and no
   recovery codes: the kit doesn't ask for them.
+
+  Enrollment owed at sign-in is by ticket, as the native backend's: the
+  pending secret travels in a term sealed with `Macaw.Auth.Native.Seal`
+  under this backend's own key, ten minutes long, and nothing is stored
+  until a code confirms it; the factor's row is inserted only when none
+  exists (`:ets.insert_new/2`), so a ticket enrolls once.
   """
 
   @behaviour Macaw.Auth.Backend
   @behaviour Macaw.Auth.Conformance.Fixtures
 
   alias Macaw.Auth.{Session, User}
+  alias Macaw.Auth.Native.Seal
 
   @users __MODULE__.Users
   @sessions __MODULE__.Sessions
   @factors __MODULE__.Factors
   @idle 3_600
   @touch_every 300
+  @ticket_ttl 600
+  @ticket_key :crypto.strong_rand_bytes(32)
+  @ticket_aad "memory backend enrollment ticket"
 
   # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -238,8 +248,7 @@ defmodule Macaw.Auth.Test.MemoryBackend do
     end
   end
 
-  defp with_step(s, step) when step in [:second_factor, :second_factor_enroll],
-    do: %{s | second_factor_passed: true}
+  defp with_step(s, :second_factor), do: %{s | second_factor_passed: true}
 
   defp with_step(s, step), do: %{s | completed_steps: Enum.uniq([step | s.completed_steps])}
 
@@ -272,6 +281,70 @@ defmodule Macaw.Auth.Test.MemoryBackend do
   end
 
   defp matching_step(_secret, _code, _opts, _last), do: :error
+
+  @impl Macaw.Auth.Backend
+  def enrollment_ticket(%User{} = user, opts) do
+    case user_by_id(user.id) do
+      %User{second_factor: :required, disabled: false} = owing ->
+        term = %{
+          account_id: owing.id,
+          purpose: :owed,
+          issued_at: unix(opts),
+          secret: NimbleTOTP.secret()
+        }
+
+        {:ok, Seal.seal(:erlang.term_to_binary(term), @ticket_key, @ticket_aad)}
+
+      _not_owing ->
+        {:error, :invalid}
+    end
+  end
+
+  @impl Macaw.Auth.Backend
+  def enrollment(ticket, opts) do
+    with {:ok, %{secret: secret}, user} <- open_ticket(ticket, opts) do
+      label = "Memory:" <> user.username
+      {:ok, %{secret: secret, uri: NimbleTOTP.otpauth_uri(label, secret, issuer: "Memory")}}
+    end
+  end
+
+  @impl Macaw.Auth.Backend
+  def enroll_second_factor(ticket, code, opts) do
+    with {:ok, %{secret: secret}, user} <- open_ticket(ticket, opts),
+         {:ok, step} <- confirming_step(secret, code, opts) do
+      if :ets.insert_new(@factors, {user.id, secret, step}) do
+        enrolled = %{user | second_factor: :enrolled}
+        [{name, _user, hash}] = :ets.lookup(@users, user.username)
+        :ets.insert(@users, {name, enrolled, hash})
+        {:ok, enrolled, []}
+      else
+        {:error, :invalid_ticket}
+      end
+    end
+  end
+
+  defp confirming_step(secret, code, opts) do
+    case matching_step(secret, code, opts, -1) do
+      {:ok, step} -> {:ok, step}
+      :error -> {:error, :invalid_code}
+    end
+  end
+
+  defp open_ticket(ticket, opts) when is_binary(ticket) do
+    with {:ok, plain} <- Seal.unseal(ticket, @ticket_key, @ticket_aad),
+         %{account_id: id, purpose: :owed, issued_at: at} = term <-
+           :erlang.binary_to_term(plain, [:safe]),
+         true <- unix(opts) < at + @ticket_ttl,
+         %User{second_factor: :required, disabled: false} = user <- user_by_id(id) do
+      {:ok, term, user}
+    else
+      _refused -> {:error, :invalid_ticket}
+    end
+  end
+
+  defp open_ticket(_ticket, _opts), do: {:error, :invalid_ticket}
+
+  defp unix(opts), do: opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> DateTime.to_unix()
 
   defp user_by_id(id) do
     Enum.find_value(:ets.tab2list(@users), fn {_, u, _} -> if u.id == id, do: u end)

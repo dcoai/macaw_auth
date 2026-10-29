@@ -11,18 +11,21 @@ What an app uses, whatever backend is behind it: `Macaw.Auth`, the facade; `Maca
 | Function | Calls | Returns |
 |---|---|---|
 | `Macaw.Auth.authenticate/2` | `authenticate/2` | `{:ok, user}` or `{:error, refusal}` |
-| `Macaw.Auth.create_session/2` | `create_session/2` (§5) | `{:ok, token, session}` or `{:error, :invalid}` |
+| `Macaw.Auth.create_session/2` | `create_session/2` (§5) | `{:ok, token, session}`, `{:error, :invalid}`, or `{:error, :enrollment_required}` without asking it |
 | `Macaw.Auth.fetch/2` | `fetch_session/2` | `{:ok, user, session}` or `{:error, reason}` |
 | `Macaw.Auth.fetch_by_id/2` | `fetch_session_by_id/2` | `{:ok, user, session}` or `{:error, reason}` |
 | `Macaw.Auth.session_idle_seconds/1` | `session_idle_seconds/1` (§2.8) | the idle limit, in seconds |
 | `Macaw.Auth.list_sessions/2` | `list_sessions/2` | the user's sessions, newest first |
 | `Macaw.Auth.complete_step/3` | `complete_step/3` | `:ok` or `{:error, :invalid}` |
 | `Macaw.Auth.verify_second_factor/3` | `verify_second_factor/3` | `:ok` or `{:error, reason}` |
+| `Macaw.Auth.enrollment_ticket/2` | `enrollment_ticket/2` (§2.10) | `{:ok, ticket}` or `{:error, reason}` |
+| `Macaw.Auth.enrollment/2` | `enrollment/2` (§2.10) | `{:ok, %{secret, uri}}` or `{:error, :invalid_ticket}` |
+| `Macaw.Auth.enroll_second_factor/3` | `enroll_second_factor/3` (§2.10) | `{:ok, user, recovery_codes}` or `{:error, reason}` |
 | `Macaw.Auth.revoke/2` | `revoke_sessions/2`, then the push (§6) | `:ok` |
 | the application's start (`Macaw.Auth.Application`) | `check_config!/0` (§2.9) | starts; a fault in the configuration refuses boot |
 
 - **`fetch/2` of anything but a binary** (`nil`, a session without a token) is `{:error, :invalid}`, without asking the backend.
-- **`complete_step/3` takes only a step** of `steps/0`; any other atom is a `FunctionClauseError`, never passed on.
+- **`complete_step/3` takes only a step** of `steps/0`; any other atom, `:second_factor_enroll` among them (enrollment is no step, §4), is a `FunctionClauseError`, never passed on.
 - `opts` pass through unchanged; `:now` (a `DateTime`) overrides every backend's clock (§2).
 
 ```test:facade-fetch-non-binary
@@ -30,7 +33,7 @@ Macaw.Auth.fetch(nil) and Macaw.Auth.fetch(:x) are {:error, :invalid} without th
 ```
 
 ```test:facade-complete-step-guard
-Macaw.Auth.complete_step(id, :not_a_step) raises FunctionClauseError; :second_factor, :second_factor_enroll and :password_change reach the backend
+Macaw.Auth.complete_step(id, :not_a_step) and complete_step(id, :second_factor_enroll) raise FunctionClauseError; :second_factor and :password_change reach the backend
 ```
 
 ### 1.1 Choosing the backend {#auth-backend-config}
@@ -43,10 +46,11 @@ with :backend deleted from the application environment, Macaw.Auth.backend/0 rai
 
 ## 2. The backend behavior {#auth-backend}
 
-`Macaw.Auth.Backend` is what a backend implements: who someone is, and their sessions. Nothing else. Every callback but `check_config!/0` (§2.9) takes `opts`, a keyword list in which **`:now` (a `DateTime`) overrides the clock**, so expiry is testable. A backend **never raises for an ordinary refusal:** it returns an error value; only `check_config!/0` raises, and only for a fault in the backend's configuration, which is a deployment's bug, never a visitor's refusal. And it must:
+`Macaw.Auth.Backend` is what a backend implements: who someone is, their sessions, and their second factor (verifying a code, §2.7, and enrolling by ticket, §2.10). Nothing else. Every callback but `check_config!/0` (§2.9) takes `opts`, a keyword list in which **`:now` (a `DateTime`) overrides the clock**, so expiry is testable. A backend **never raises for an ordinary refusal:** it returns an error value; only `check_config!/0` raises, and only for a fault in the backend's configuration, which is a deployment's bug, never a visitor's refusal. And it must:
 - **store no more than a hash of a session token;**
 - **spend the same time refusing an unknown user as a wrong password,** and give both the same refusal;
-- **refuse a disabled user's sessions, and expire idle ones.**
+- **refuse a disabled user's sessions, and expire idle ones;**
+- **store nothing of an enrollment before it is confirmed** (§2.10).
 
 The conformance kit checks what it can of these ([04](04-conformance.md)).
 
@@ -93,7 +97,7 @@ for each backend: a user deleted after signing in gets {:error, :invalid} from M
 
 ### 2.6 complete_step/3 {#auth-backend-complete-step}
 
-`complete_step(session_id, step, opts)` records that a session completed a step (§4): `:second_factor` and `:second_factor_enroll` mark its second factor passed; `:password_change` joins its completed steps. `:ok`.
+`complete_step(session_id, step, opts)` records that a session completed a step (§4): `:second_factor` marks its second factor passed; `:password_change` joins its completed steps. `:ok`.
 
 **A session that doesn't exist** (never did, or revoked meanwhile, even between the backend's read and its write) is **`{:error, :invalid}`**, never a raise, and stays gone. `Macaw.Auth.Plug.complete_step/2` then logs out ([02 §7.2](02-plugs.md#auth-plug-complete-step)). Added in v0.2.0: before it, the callback allowed only `:ok`.
 
@@ -123,6 +127,26 @@ Macaw.Auth.session_idle_seconds/0 with the native backend is 14 × 86 400 by def
 with :backend naming a backend whose check_config!/0 raises, :macaw_auth refuses to start, the error the backend's, naming the fault; with one whose check_config!/0 answers other than :ok, it refuses too; with the memory backend, it starts; with :backend unset, it starts without asking any backend
 ```
 
+### 2.10 Enrollment by ticket {#auth-backend-enroll}
+
+**A user who owes enrollment at sign-in gets no session** (a second factor policy requires, `second_factor: :required`): a password alone never holds a session. They get an **enrollment ticket** instead, which can do nothing but enroll their account, and a session may start only once the enrollment is confirmed (dco-tek/macaw/macaw#101). Three callbacks, added in v0.5.0 (a backend written for v0.4 must add them; one without a second factor answers each `{:error, :unsupported}`, as the Ash backend answers `verify_second_factor/3`):
+- **`enrollment_ticket(user, opts)`** issues the ticket in place of a session: `{:ok, ticket}`, a binary the client holds, or `{:error, :invalid}` for a user who owes none (gone, disabled, enrolled, not required). **Nothing unconfirmed is stored:** the pending secret travels inside the ticket, which is sealed so the client can neither read nor change it;
+- **`enrollment(ticket, opts)`** is what the enrollment page shows: `{:ok, %{secret, uri}}`, a TOTP secret (RFC 6238: SHA-1, six digits, 30 seconds) and its `otpauth://` URI for a QR code, the same on every reload, or `{:error, :invalid_ticket}`;
+- **`enroll_second_factor(ticket, code, opts)`** completes the enrollment **from the ticket alone,** with a valid code for its secret, behind the backend's throttle: `{:ok, user, recovery_codes}`, the user now `:enrolled`, or `{:error, :invalid_code | :throttled | :invalid_ticket}`. It starts no session; the caller does, with its second factor passed ([02 §8.1](02-plugs.md#auth-plug-enroll)).
+
+**A ticket is refused** (`{:error, :invalid_ticket}`, for `enrollment/2` and `enroll_second_factor/3` alike):
+- **ten minutes after it was issued,** by the `:now` option's clock, a constant no setting changes;
+- **tampered,** or anything that isn't a ticket the backend issued;
+- **spent:** once the enrollment it carries is confirmed, the account is enrolled, and a ticket of an enrolled account is refused, so a ticket enrolls once;
+- of an account **disabled, or gone,** during its lifetime;
+- **of another purpose:** a backend may issue tickets for other enrollments (the native backend's, a signed-in user choosing to enroll, [11 §3](11-native-totp.md#auth-totp-enroll)); only one issued by `enrollment_ticket/2` is accepted here.
+
+The kit checks these for every backend that runs it ([04 §2](04-conformance.md#auth-kit-checks)); the native backend's are [11 §3](11-native-totp.md#auth-totp-enroll).
+
+```test:facade-enroll
+the facade passes enrollment_ticket/2, enrollment/2 and enroll_second_factor/3 to the backend with their arguments and opts unchanged, and returns its answers
+```
+
 ## 3. Paths {#auth-paths}
 
 `Macaw.Auth.path/1` gives a configured path, `config :macaw_auth, paths: %{name => path}`, else its default:
@@ -136,7 +160,7 @@ with :backend naming a backend whose check_config!/0 raises, :macaw_auth refuses
 | `:second_factor_enroll` | `"/second-factor/enroll"` |
 | `:password_change` | `"/password"` |
 
-A configured map need name only what it changes; the rest keep their defaults, and it may add names of its own. **A name neither configured nor in the table raises `ArgumentError`** naming it and the known names: `"unknown path :reports: neither configured (config :macaw_auth, paths:) nor one of :home, :password_change, …"`.
+`:second_factor_enroll` is **the enrollment page's path,** where `Macaw.Auth.Plug.log_in/3` sends a user owing enrollment, holding a ticket and no session ([02 §7](02-plugs.md#auth-plug-log-in)); it is no step's (§4). A configured map need name only what it changes; the rest keep their defaults, and it may add names of its own. **A name neither configured nor in the table raises `ArgumentError`** naming it and the known names: `"unknown path :reports: neither configured (config :macaw_auth, paths:) nor one of :home, :password_change, …"`.
 
 ```test:paths-unknown
 with paths %{reports: "/reports"}, path(:reports) is "/reports", and path(:no_such_path) raises ArgumentError whose message contains ":no_such_path"
@@ -148,24 +172,23 @@ with no :paths, each name of the table gives its default; with paths %{home: "/h
 
 ## 4. Steps {#auth-steps}
 
-A session may owe **steps** before the app is open to it. `Macaw.Auth.steps/0` lists them in the order they are owed: `[:second_factor, :second_factor_enroll, :password_change]`.
+A session may owe **steps** before the app is open to it. `Macaw.Auth.steps/0` lists them in the order they are owed: `[:second_factor, :password_change]`. **Enrolling a second factor is not a step:** a user who owes it gets no session to owe it on (§2.10, §5). Until v0.5.0 it was, `:second_factor_enroll`, owed by a session; that path is removed, with no mode to keep it.
 
 `Macaw.Auth.pending_step/2` takes a user and a session and gives the step owed, or nil, by the first that applies:
-1. **`:second_factor`** while the session's second factor is not passed and the user's `second_factor` is `:enrolled`;
-2. **`:second_factor_enroll`** while the session's second factor is not passed and the user's `second_factor` is `:required` (policy requires one the user hasn't enrolled);
-3. **`:password_change`** while the user's `must_change_password` is set and `:password_change` is not among the session's `completed_steps`;
-4. otherwise nil.
+1. **`:second_factor`** while the session's second factor is not passed and the user's `second_factor` is not `:none`: `:enrolled`, or `:required`, a session no code can pass (no session is started for such a user, §5; one could only be left from before policy required it), so it reaches nothing but sign-out, and signing in again gives the ticket;
+2. **`:password_change`** while the user's `must_change_password` is set and `:password_change` is not among the session's `completed_steps`;
+3. otherwise nil.
 
 So the second factor comes before a password change, and a session owes at most one step at a time. **While a step is owed, only that step's page and sign-out are reachable:** `Macaw.Auth.allowed_paths/1` is `[path(step), path(:sign_out)]`, which the plugs enforce ([02 §3](02-plugs.md#auth-plug-require-authenticated)) and the hooks honor ([03 §2](03-live.md#auth-live-guarded)).
 
-Completing a step is `complete_step/3` (§2.6). The facade records it on the host's word: the second factor's page goes through `Macaw.Auth.Plug.verify_second_factor/2`, which completes `:second_factor` only for an accepted code ([02 §8](02-plugs.md#auth-plug-verify)); enrollment's page completes `:second_factor_enroll` after the backend confirmed the enrollment; the password page completes `:password_change` after the password changed.
+Completing a step is `complete_step/3` (§2.6). The facade records it on the host's word: the second factor's page goes through `Macaw.Auth.Plug.verify_second_factor/2`, which completes `:second_factor` only for an accepted code ([02 §8](02-plugs.md#auth-plug-verify)); the password page completes `:password_change` after the password changed.
 
 ```test:pending-step-order
 an enrolled user who must change their password: a fresh session owes :second_factor; with the second factor passed, :password_change; with :password_change completed, nil
 ```
 
 ```test:pending-step-required
-a user whose second_factor is :required owes :second_factor_enroll until the session's second factor is passed; a user with :none owes nothing
+a session of a user whose second_factor is :required owes :second_factor until its second factor is passed; a user with :none owes nothing
 ```
 
 ```test:allowed-paths
@@ -174,7 +197,13 @@ allowed_paths(:second_factor) is [path(:second_factor), path(:sign_out)]
 
 ## 5. Starting a session {#auth-create-session}
 
-`Macaw.Auth.create_session/2` passes `second_factor_passed` to the backend: the option when given, else **true only when the user's `second_factor` is `:none`**. So a user with one enrolled or required starts a session that owes it, and a caller can't forget to.
+`Macaw.Auth.create_session/2` passes `second_factor_passed` to the backend: the option when given, else **true only when the user's `second_factor` is `:none`**. So a user with one enrolled starts a session that owes it, and a caller can't forget to.
+
+**A user who owes enrollment (`:required`) gets no session,** whatever the options: `{:error, :enrollment_required}`, without asking the backend (§2.10). After their enrollment is confirmed they are `:enrolled`, and the session the caller then starts passes `second_factor_passed: true`, the code having just been proven ([02 §8.1](02-plugs.md#auth-plug-enroll)).
+
+```test:create-session-enrollment-required
+create_session of a :required user, with no options, second_factor_passed: true or false, is {:error, :enrollment_required}, and the backend is never called
+```
 
 ```test:create-session-owes
 a user with second_factor :enrolled gets a session whose pending step is :second_factor; with :none, nil; second_factor_passed: true given explicitly overrides

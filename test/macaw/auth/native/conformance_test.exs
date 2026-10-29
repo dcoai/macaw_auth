@@ -14,13 +14,13 @@ defmodule Macaw.Auth.Native.ConformanceTest do
   # only the tests written in this file, so these check the kit from here.
 
   @tag verifies: "kit-native"
-  test "the kit's twenty-two tests run against the native backend, none skipped" do
+  test "the kit's twenty-five tests run against the native backend, none skipped" do
     kit =
       for %ExUnit.Test{name: name} = test <- __ex_unit__().tests,
           String.starts_with?(Atom.to_string(name), "test conformance: "),
           do: test
 
-    assert length(kit) == 22
+    assert length(kit) == 25
     assert Enum.all?(kit, &(&1.tags[:skip] == nil))
   end
 

@@ -8,7 +8,7 @@ defmodule Macaw.Auth.PlugNativeTest do
 
   alias Macaw.Auth
   alias Macaw.Auth.Native
-  alias Macaw.Auth.Native.Throttle
+  alias Macaw.Auth.Native.{SessionRecord, Throttle, Totp}
   alias Macaw.Auth.Plug, as: AuthPlug
   alias Macaw.Auth.Test.NativeFixtures
 
@@ -65,6 +65,39 @@ defmodule Macaw.Auth.PlugNativeTest do
       v6 = from({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1})
       for i <- 1..5, do: AuthPlug.authenticate(v6, %{username: "v#{i}", password: "x"}, now: @t0)
       assert Throttle.check({:name, "someone"}, "2001:db8::1", ms(0)) == {:delay, 1_000}
+    end
+
+    @tag verifies: "auth-plug-enroll"
+    test "enrollment owed at sign-in: no session row until the code, the conn's address counted" do
+      configure!(sealing_key: NativeFixtures.sealing_key(), totp_required: ["admin"])
+
+      user =
+        "sky" |> local_user!("correct horse battery", %{roles: ["admin"]}) |> Native.to_user()
+
+      signed_in = from({192, 0, 2, 70}) |> init_test_session(%{}) |> AuthPlug.log_in(user)
+      assert Repo.aggregate(SessionRecord, :count) == 0
+
+      page =
+        %{conn(:post, "/second-factor/enroll") | remote_ip: {192, 0, 2, 70}}
+        |> init_test_session(get_session(signed_in))
+
+      {:ok, %{secret: secret}} = AuthPlug.enrollment(page)
+
+      for _ <- 1..3,
+          do: assert({:error, :invalid_code, _} = AuthPlug.enroll_second_factor(page, "000001"))
+
+      rows = Throttle.rows()
+      assert [{_, 3, _}] = Enum.filter(rows, &(elem(&1, 0) == {:ip, "192.0.2.70"}))
+      assert [{_, 3, _}] = Enum.filter(rows, &(elem(&1, 0) == {:user, {:second_factor, user.id}}))
+      assert Repo.aggregate(SessionRecord, :count) == 0
+
+      assert {:ok, [_ | _] = codes, conn} =
+               AuthPlug.enroll_second_factor(page, Totp.code(secret, DateTime.utc_now()))
+
+      assert length(codes) == 10
+      assert [%{user_id: id, remote_ip: "192.0.2.70"}] = Repo.all(SessionRecord)
+      assert id == user.id
+      assert conn.assigns.current_session.second_factor_passed
     end
 
     @tag verifies: "auth-plug-verify"

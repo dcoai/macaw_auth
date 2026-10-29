@@ -22,8 +22,14 @@ defmodule Macaw.Auth.Plug do
   step's page and sign-out are reachable meanwhile.
 
   The second factor's page calls `verify_second_factor/2` with the
-  submitted code; enrollment's page, after the backend confirms it,
-  `complete_step(conn, :second_factor_enroll)`.
+  submitted code. **Enrollment owed at sign-in has no session:**
+  `log_in/3` gives a user whom policy requires to enroll
+  (`second_factor: :required`) an enrollment ticket in the session instead
+  of a session, and sends them to the enrollment page
+  (`path(:second_factor_enroll)`), a signed-out page (outside
+  `require_authenticated/2`), whose controller shows `enrollment/1` and
+  submits the code with `enroll_second_factor/2`, which starts the
+  session only once the second factor exists.
 
   Run `Macaw.Plug.ClientIp` before these, so a session records, and the
   throttle counts, the client's address, not a proxy's. Run `fetch_flash`
@@ -68,6 +74,8 @@ defmodule Macaw.Auth.Plug do
   @token_key "macaw_auth_token"
   @remember_cookie "_macaw_auth_remember"
   @return_key "macaw_auth_return_to"
+  @ticket_key "macaw_auth_enrollment_ticket"
+  @ticket_remember_key "macaw_auth_enrollment_remember"
 
   @doc """
   Assigns the signed-in user, session and pending step, or nils.
@@ -253,48 +261,81 @@ defmodule Macaw.Auth.Plug do
   end
 
   @doc """
-  Starts a session for a user who passed `Macaw.Auth.authenticate/2`: the
-  old session is renewed (no fixation), the token stored with the
-  session's `live_socket_id` (`Macaw.Auth.live_socket_id/1`), and the
-  browser sent to the step the session owes, else where it was going,
-  else home.
+  Signs in a user who passed `Macaw.Auth.authenticate/2`: the old session
+  is renewed (no fixation) and cleared, keeping only where the browser
+  was going, and then, by what the user owes:
 
-  `remember: true` also sets the remember cookie (`remember_cookie/0`):
+  - **a user who owes enrollment** (`second_factor: :required`) gets
+    **no session**: the enrollment ticket (`Macaw.Auth.enrollment_ticket/2`)
+    is put in the session instead, under `"macaw_auth_enrollment_ticket"`,
+    a remember cookie the browser sent is deleted, nothing is assigned,
+    and the browser goes to the enrollment page (`path(:second_factor_enroll)`),
+    whose controller calls `enrollment/1` and `enroll_second_factor/2`;
+  - **any other user** gets a session: its token stored with its
+    `live_socket_id` (`Macaw.Auth.live_socket_id/1`), and the browser
+    sent to the step the session owes, else where it was going, else
+    home.
+
+  `remember: true` also sets the remember cookie (`remember_cookie/0`),
+  for an enrolling user once their enrollment starts the session:
   signed, holding the token, for the backend's idle limit
   (`Macaw.Auth.session_idle_seconds/1`), `http_only`, `same_site: "Lax"`,
   and `secure` when the request is https or the declared public URL is
   (`public_scheme/0`). Without it, a remember cookie the browser sent is
-  deleted. Other `opts` go to `Macaw.Auth.create_session/2`.
+  deleted. Other `opts` go to `Macaw.Auth.create_session/2` (or
+  `Macaw.Auth.enrollment_ticket/2`).
 
-  When the backend refuses the session (`{:error, :invalid}`: the user no
-  longer exists), the sign-in fails: back to the sign-in page, with an
-  error flash when the pipeline ran `fetch_flash`, and neither the session
-  nor any cookie touched.
+  When the backend refuses the session or the ticket (`{:error, :invalid}`:
+  the user no longer exists, or no longer owes enrollment), the sign-in
+  fails: back to the sign-in page, with an error flash when the pipeline
+  ran `fetch_flash`, and neither the session nor any cookie touched.
   """
   def log_in(conn, user, opts \\ []) do
     {remember, opts} = Keyword.pop(opts, :remember, false)
 
-    session_opts =
-      Keyword.merge(
-        [
-          remote_ip: client_ip(conn),
-          user_agent: conn |> get_req_header("user-agent") |> List.first()
-        ],
-        opts
-      )
-
-    case Auth.create_session(user, session_opts) do
-      {:ok, token, session} ->
-        logged_in(conn, user, token, session, remember)
-
-      {:error, :invalid} ->
-        conn
-        |> flash(:error, "You could not be signed in.")
-        |> redirect(Auth.path(:sign_in))
+    case begin(conn, user, opts) do
+      {:session, token, session} -> logged_in(conn, user, token, session, remember)
+      {:ticket, ticket} -> owe_enrollment(conn, ticket, remember)
+      :refused -> refused(conn)
     end
   end
 
-  defp logged_in(conn, user, token, session, remember) do
+  defp begin(_conn, %Auth.User{second_factor: :required} = user, opts) do
+    case Auth.enrollment_ticket(user, opts) do
+      {:ok, ticket} -> {:ticket, ticket}
+      {:error, _not_owed} -> :refused
+    end
+  end
+
+  defp begin(conn, user, opts) do
+    case Auth.create_session(user, session_opts(conn, opts)) do
+      {:ok, token, session} -> {:session, token, session}
+      {:error, :invalid} -> :refused
+    end
+  end
+
+  defp session_opts(conn, opts) do
+    Keyword.merge(
+      [
+        remote_ip: client_ip(conn),
+        user_agent: conn |> get_req_header("user-agent") |> List.first()
+      ],
+      opts
+    )
+  end
+
+  defp refused(conn) do
+    conn
+    |> flash(:error, "You could not be signed in.")
+    |> redirect(Auth.path(:sign_in))
+  end
+
+  defp logged_in(conn, user, token, session, remember),
+    do: conn |> start(user, token, session, remember) |> continue()
+
+  # The session, started: renewed and cleared but for the return path (an
+  # enrollment ticket goes with the rest), the token and socket id stored.
+  defp start(conn, user, token, session, remember) do
     return_to = get_session(conn, @return_key)
 
     conn
@@ -302,11 +343,88 @@ defmodule Macaw.Auth.Plug do
     |> clear_session()
     |> put_session(@token_key, token)
     |> put_session(:live_socket_id, Auth.live_socket_id(session.id))
-    |> then(&if(return_to, do: put_session(&1, @return_key, return_to), else: &1))
+    |> keep_return(return_to)
     |> remember(remember, token)
     |> signed_in(user, session)
-    |> continue()
   end
+
+  defp owe_enrollment(conn, ticket, remember) do
+    return_to = get_session(conn, @return_key)
+
+    conn
+    |> configure_session(renew: true)
+    |> clear_session()
+    |> put_session(@ticket_key, ticket)
+    |> put_session(@ticket_remember_key, remember == true)
+    |> keep_return(return_to)
+    |> forget()
+    |> signed_out()
+    |> redirect(Auth.path(:second_factor_enroll))
+  end
+
+  defp keep_return(conn, nil), do: conn
+  defp keep_return(conn, return_to), do: put_session(conn, @return_key, return_to)
+
+  @doc """
+  What the enrollment page shows of the session's enrollment ticket (put
+  there by `log_in/3`): `{:ok, %{secret, uri}}`, the TOTP secret and its
+  `otpauth://` URI for the QR code (`Macaw.Auth.enrollment/2`), or
+  `{:error, :invalid_ticket}` when the session holds none or the backend
+  refuses it (expired, tampered, spent, its account disabled): the page
+  then sends the browser to sign in again.
+  """
+  @spec enrollment(Plug.Conn.t()) ::
+          {:ok, %{secret: binary(), uri: String.t()}} | {:error, atom()}
+  def enrollment(conn) do
+    case get_session(conn, @ticket_key) do
+      ticket when is_binary(ticket) -> Auth.enrollment(ticket)
+      _none -> {:error, :invalid_ticket}
+    end
+  end
+
+  @doc """
+  Completes the enrollment the session's ticket carries with a submitted
+  code (`Macaw.Auth.enroll_second_factor/3`, the conn's address as
+  `:remote_ip` for the backend's throttle), and only then starts the
+  session, its second factor passed, as `log_in/3` starts one (renewed,
+  the ticket gone, the remember cookie when sign-in asked for it):
+  `{:ok, recovery_codes, conn}`, the conn signed in and **not**
+  redirected, for the page to show the codes once; its next request goes
+  on as any signed-in one (`continue/1` sends it where it was going).
+
+  On a refusal, `{:error, reason, conn}`, unhalted for the page to render
+  the reason: `:invalid_code` or `:throttled` (the ticket kept, to try
+  again), `:invalid_ticket` (none in the session, or refused: it is
+  deleted, and the page sends the browser to sign in), or `:invalid` (the
+  user was deleted as their enrollment completed).
+
+      def create(conn, %{"code" => code}) do
+        case Macaw.Auth.Plug.enroll_second_factor(conn, code) do
+          {:ok, codes, conn} -> render(conn, :recovery_codes, codes: codes)
+          {:error, :invalid_ticket, conn} -> redirect(conn, to: ~p"/login")
+          {:error, reason, conn} -> render(conn, :new, error: reason)
+        end
+      end
+  """
+  @spec enroll_second_factor(Plug.Conn.t(), term()) ::
+          {:ok, [String.t()], Plug.Conn.t()} | {:error, atom(), Plug.Conn.t()}
+  def enroll_second_factor(conn, code) do
+    with ticket when is_binary(ticket) <- get_session(conn, @ticket_key),
+         {:ok, user, codes} <-
+           Auth.enroll_second_factor(ticket, code, remote_ip: client_ip(conn)),
+         {:ok, token, session} <-
+           Auth.create_session(user, session_opts(conn, second_factor_passed: true)) do
+      remember = get_session(conn, @ticket_remember_key) == true
+      {:ok, codes, start(conn, user, token, session, remember)}
+    else
+      {:error, :invalid_ticket} -> {:error, :invalid_ticket, drop_ticket(conn)}
+      {:error, reason} -> {:error, reason, conn}
+      _none -> {:error, :invalid_ticket, conn}
+    end
+  end
+
+  defp drop_ticket(conn),
+    do: conn |> delete_session(@ticket_key) |> delete_session(@ticket_remember_key)
 
   defp remember(conn, true, token), do: put_remember_cookie(conn, token)
   defp remember(conn, false, _token), do: forget(conn)

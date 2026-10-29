@@ -132,8 +132,8 @@ defmodule Macaw.Auth.Native.UsersTest do
     test "delete_user/2 revokes a user's sessions, then deletes them with their recovery codes" do
       record = local_user!("mona", "correct horse battery")
       user = Native.to_user(record)
-      {:ok, %{secret: secret}} = Native.enroll_begin(user)
-      {:ok, [_ | _]} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
+      {:ok, [_ | _]} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
       enrolled = Native.to_user(Repo.get!(UserRecord, user.id))
       {:ok, token, _} = Auth.create_session(enrolled)
       {:ok, _, _} = Auth.create_session(enrolled)
@@ -223,8 +223,8 @@ defmodule Macaw.Auth.Native.UsersTest do
     test "admin_reset/2 with announce: false clears the factor and sessions, telling no page" do
       record = local_user!("jack", "correct horse battery")
       user = Native.to_user(record)
-      {:ok, %{secret: secret}} = Native.enroll_begin(user)
-      {:ok, _codes} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
+      {:ok, _codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
       {:ok, token, _} = Auth.create_session(Native.to_user(Repo.get!(UserRecord, user.id)))
       :ok = Auth.subscribe(user.id)
 

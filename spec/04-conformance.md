@@ -10,6 +10,8 @@ end
 
 `backend:` and `fixtures:` are required. The kit's tests are `async: false`. Before each, it sets `config :macaw_auth, backend:` to the backend under test and calls the fixtures' `reset!/0`; after each, it puts back the backend that was configured (or deletes the setting when none was). It runs against the native backend and the in-memory test backend in this library's CI, and against the Ash backend in macaw_auth_ash's.
 
+**Every case binds every backend that runs the kit, the Ash backend included.** There is no second, lighter kit: macaw_auth_ash runs these same cases, and its only relief is the visible `pending:` of §3. Enrollment by ticket (tests 21–24) is in the second-factor group, so the Ash backend, which runs with `pending: [second_factor: …]`, skips those cases, as it skips the other second-factor ones, and is bound by all of them the day it drops the pending. The ticket's callbacks bind it now: a backend for v0.5.0 implements `enrollment_ticket/2`, `enrollment/2` and `enroll_second_factor/3` ([01 §2.10](01-contract.md#auth-backend-enroll)), one without a second factor as `{:error, :unsupported}`, and since it never reports `:required`, no user of it is ever sent to enroll.
+
 ## 1. The fixtures {#auth-kit-fixtures}
 
 The fixtures module implements `Macaw.Auth.Conformance.Fixtures`, what a backend gives the kit:
@@ -28,7 +30,7 @@ A fixture that confirms enrollment with the current step's code has spent it: it
 
 ## 2. The checks {#auth-kit-checks}
 
-Twenty-two tests, in five groups.
+Twenty-five tests, in five groups.
 
 **`conformance: authenticate`:**
 1. valid credentials sign in, as the fixture's user;
@@ -60,28 +62,31 @@ Twenty-two tests, in five groups.
 18. a user enrolled through `enroll_second_factor!/1` signs in reported `:enrolled`, and **a valid code passes the step** (`Macaw.Auth.verify_second_factor/3`);
 19. a wrong code (every digit changed) is refused, and the step is still owed;
 20. **a code is accepted once:** accepted on one session, the same code is refused on another of the user's, which still owes the step;
-21. a user policy requires to have one (`:required`) owes `:second_factor_enroll`, and completing it clears it.
+21. **a user policy requires to have one (`:required`) gets no session** (`Macaw.Auth.create_session/2` is `{:error, :enrollment_required}`, with or without `second_factor_passed: true`), but **an enrollment ticket** (`Macaw.Auth.enrollment_ticket/2`, a binary) whose `enrollment/2` gives a TOTP secret and an `otpauth://totp/` URI; a wrong code is `{:error, :invalid_code}`, and a valid one, **from the ticket alone,** gives the user `:enrolled` with their recovery codes, still with no session, and the user signs in reported `:enrolled` ([01 §2.10](01-contract.md#auth-backend-enroll));
+22. **an expired or tampered ticket is refused:** shown 599 seconds after its issue and `{:error, :invalid_ticket}` at 600, by `:now`, for `enrollment/2` and `enroll_second_factor/3`; so are the ticket with its last byte flipped, 64 random bytes, `""` and `nil`; the untouched ticket then still enrolls;
+23. **a ticket is spent by the enrollment it completes:** once enrolled, the same ticket is `{:error, :invalid_ticket}` for both, and no further ticket is issued for the account;
+24. **a ticket of an account disabled during its lifetime is refused,** for both, and the account gets no new one.
 
 **`conformance: configuration`:**
 
-22. **the backend checks its configuration:** it exports `check_config!/0`, and with the configuration the kit's tests run under, it is `:ok` ([01 §2.9](01-contract.md#auth-backend-check-config)) (v0.4.0).
+25. **the backend checks its configuration:** it exports `check_config!/0`, and with the configuration the kit's tests run under, it is `:ok` ([01 §2.9](01-contract.md#auth-backend-check-config)) (v0.4.0).
 
 Test 5 needs the fixtures: the contract has no way to delete a user, so `delete!/1` does it the backend's own way, as `disable!/1` disables one. A revocation racing a backend between its own read and write can't be driven portably, so the kit checks a session revoked before the step (test 16), and the native backend's own suite checks the race ([09 §6](09-native-sessions.md#auth-sessions-steps)).
 
 The kit does not check timing parity, escaping or throttling; a backend's own suite does (the native backend's: [06 §3](06-native-sources.md#auth-source-password), [07 §5](07-native-ldap.md#auth-ldap-escape), [10](10-native-throttle.md)).
 
 ```test:kit-native
-the kit run against Macaw.Auth.Native passes all twenty-two tests, none skipped
+the kit run against Macaw.Auth.Native passes all twenty-five tests, none skipped
 ```
 
 ```test:kit-memory
-the kit run against the in-memory test backend passes all twenty-two tests, none skipped
+the kit run against the in-memory test backend passes all twenty-five tests, none skipped
 ```
 
 ## 3. Pending capabilities {#auth-kit-pending}
 
-A backend still being built may name a capability it doesn't have yet: `pending: [second_factor: "why"]`. The tests that need it are then **skipped, visibly,** tagged `skip: "pending (second factor): <why>"`, so every run's summary says so, rather than removed or passed by a fixture that pretends. The only capability is `:second_factor`, which skips the whole `conformance: second factor` group (tests 17–21). The native backend ran the kit with it pending until its second factor existed, and was then required to remove it (macaw_compose#51, #52); the Ash backend runs with it pending until AshAuthentication 5.0 is final.
+A backend still being built may name a capability it doesn't have yet: `pending: [second_factor: "why"]`. The tests that need it are then **skipped, visibly,** tagged `skip: "pending (second factor): <why>"`, so every run's summary says so, rather than removed or passed by a fixture that pretends. The only capability is `:second_factor`, which skips the whole `conformance: second factor` group (tests 17–24), enrollment by ticket with it. The native backend ran the kit with it pending until its second factor existed, and was then required to remove it (macaw_compose#51, #52); the Ash backend runs with it pending until AshAuthentication 5.0 is final.
 
 ```test:kit-pending
-a backend run with pending: [second_factor: "reason"] reports the five second-factor tests skipped, each with "pending (second factor): reason", and the other seventeen run
+a backend run with pending: [second_factor: "reason"] reports the eight second-factor tests skipped, each with "pending (second factor): reason", and the other seventeen run
 ```

@@ -88,8 +88,8 @@ defmodule Macaw.Auth.Native.ReleaseTest do
                [%{"ok" => true, "enabled" => "alice"}]
 
       assert {:ok, user} = sign_in("alice", "second pw")
-      {:ok, %{secret: secret}} = Native.enroll_begin(user)
-      {:ok, _codes} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
+      {:ok, _codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
 
       assert release(:user, prefix, ["reset-second-factor", "alice"]) ==
                [%{"ok" => true, "second_factor_reset" => "alice"}]

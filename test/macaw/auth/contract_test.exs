@@ -45,6 +45,18 @@ defmodule Macaw.Auth.ContractTest.Recorder do
     do: reply({:verify_second_factor, id, code, opts}, {:error, :invalid_code})
 
   @impl true
+  def enrollment_ticket(user, opts),
+    do: reply({:enrollment_ticket, user, opts}, {:ok, "a ticket"})
+
+  @impl true
+  def enrollment(ticket, opts),
+    do: reply({:enrollment, ticket, opts}, {:ok, %{secret: "s", uri: "otpauth://totp/x"}})
+
+  @impl true
+  def enroll_second_factor(ticket, code, opts),
+    do: reply({:enroll_second_factor, ticket, code, opts}, {:error, :invalid_ticket})
+
+  @impl true
   def check_config!, do: reply(:check_config!, :ok)
 
   defp reply(call, answer) do
@@ -109,10 +121,30 @@ defmodule Macaw.Auth.ContractTest do
       assert_raise FunctionClauseError, fn -> apply(Auth, :complete_step, [7, :not_a_step]) end
       refute_received {:backend, _}
 
-      for step <- [:second_factor, :second_factor_enroll, :password_change] do
+      for step <- [:second_factor, :password_change] do
         assert Auth.complete_step(7, step) == :ok
         assert_received {:backend, {:complete_step, 7, ^step, []}}
       end
+
+      # Enrollment is no step a session owes: it has no session.
+      assert_raise FunctionClauseError, fn ->
+        apply(Auth, :complete_step, [7, :second_factor_enroll])
+      end
+    end
+
+    @tag verifies: "facade-enroll"
+    test "enrollment by ticket passes through to the backend, its answers returned as they are" do
+      opts = [now: ~U[2026-10-01 12:00:00Z], remote_ip: "192.0.2.1"]
+      user = Recorder.user()
+
+      assert Auth.enrollment_ticket(user, opts) == {:ok, "a ticket"}
+      assert_received {:backend, {:enrollment_ticket, ^user, ^opts}}
+
+      assert Auth.enrollment("t", opts) == {:ok, %{secret: "s", uri: "otpauth://totp/x"}}
+      assert_received {:backend, {:enrollment, "t", ^opts}}
+
+      assert Auth.enroll_second_factor("t", "123456", opts) == {:error, :invalid_ticket}
+      assert_received {:backend, {:enroll_second_factor, "t", "123456", ^opts}}
     end
 
     @tag verifies: "auth-contract-facade"
@@ -148,6 +180,15 @@ defmodule Macaw.Auth.ContractTest do
 
       assert Auth.verify_second_factor(7, "123456", opts) == {:error, :invalid_code}
       assert_received {:backend, {:verify_second_factor, 7, "123456", ^opts}}
+
+      assert Auth.enrollment_ticket(user, opts) == {:ok, "a ticket"}
+      assert_received {:backend, {:enrollment_ticket, ^user, ^opts}}
+
+      assert Auth.enrollment("t", opts) == {:ok, %{secret: "s", uri: "otpauth://totp/x"}}
+      assert_received {:backend, {:enrollment, "t", ^opts}}
+
+      assert Auth.enroll_second_factor("t", "123456", opts) == {:error, :invalid_ticket}
+      assert_received {:backend, {:enroll_second_factor, "t", "123456", ^opts}}
 
       # revoke/2: revoke_sessions/2, then the push to the user's pages.
       :ok = Auth.subscribe(1)
@@ -186,7 +227,7 @@ defmodule Macaw.Auth.ContractTest do
 
   describe "every backend" do
     @tag verifies: "auth-backend"
-    test "ten callbacks; :now moves the clock; refusals are values; only a hash of a token is stored" do
+    test "thirteen callbacks; :now moves the clock; refusals are values; only a hash of a token is stored" do
       assert Enum.sort(Backend.behaviour_info(:callbacks)) ==
                Enum.sort(
                  authenticate: 2,
@@ -198,6 +239,9 @@ defmodule Macaw.Auth.ContractTest do
                  revoke_sessions: 2,
                  complete_step: 3,
                  verify_second_factor: 3,
+                 enrollment_ticket: 2,
+                 enrollment: 2,
+                 enroll_second_factor: 3,
                  check_config!: 0
                )
 
@@ -411,15 +455,38 @@ defmodule Macaw.Auth.ContractTest do
            %{backend: {_, fixtures}} do
         {user, _} = fixtures.user!(%{})
 
-        for step <- [:second_factor, :second_factor_enroll] do
-          {:ok, token, session} = Auth.create_session(user, second_factor_passed: false)
-          assert Auth.complete_step(session.id, step) == :ok
-          assert {:ok, _, %{second_factor_passed: true, completed_steps: []}} = Auth.fetch(token)
-        end
+        {:ok, token, session} = Auth.create_session(user, second_factor_passed: false)
+        assert Auth.complete_step(session.id, :second_factor) == :ok
+        assert {:ok, _, %{second_factor_passed: true, completed_steps: []}} = Auth.fetch(token)
 
         {:ok, token, session} = Auth.create_session(user)
         assert Auth.complete_step(session.id, :password_change) == :ok
         assert {:ok, _, %{completed_steps: [:password_change]}} = Auth.fetch(token)
+      end
+    end
+
+    for {backend, fixtures} <- @backends do
+      @tag backend: {backend, fixtures}
+      @tag verifies: "auth-backend-enroll"
+      test "a user owing enrollment: a ticket, no session; ten minutes; enrolled once, then a session may start: #{inspect(backend)}",
+           %{backend: {_, fixtures}} do
+        {user, _} = fixtures.user!(%{second_factor: :required})
+        t0 = ~U[2026-10-01 12:00:00Z]
+        later = DateTime.add(t0, 600, :second)
+
+        assert Auth.create_session(user) == {:error, :enrollment_required}
+        {:ok, ticket} = Auth.enrollment_ticket(user, now: t0)
+        {:ok, %{secret: secret}} = Auth.enrollment(ticket, now: t0)
+        code = NimbleTOTP.verification_code(secret, time: t0)
+
+        assert Auth.enroll_second_factor(ticket, code, now: later) == {:error, :invalid_ticket}
+        assert {:ok, enrolled, _codes} = Auth.enroll_second_factor(ticket, code, now: t0)
+        assert Auth.enroll_second_factor(ticket, code, now: t0) == {:error, :invalid_ticket}
+
+        {:ok, token, _} = Auth.create_session(enrolled, second_factor_passed: true)
+        {:ok, user, session} = Auth.fetch(token)
+        assert user.second_factor == :enrolled
+        assert Auth.pending_step(user, session) == nil
       end
     end
 
@@ -511,11 +578,11 @@ defmodule Macaw.Auth.ContractTest do
     end
 
     @tag verifies: "pending-step-required"
-    test "a required second factor is owed as enrollment until passed; none, nothing" do
+    test "a session of a user owing enrollment owes the second factor, which no code passes; none, nothing" do
       required = user(%{second_factor: :required})
 
       assert Auth.pending_step(required, session(%{second_factor_passed: false})) ==
-               :second_factor_enroll
+               :second_factor
 
       assert Auth.pending_step(required, session(%{second_factor_passed: true})) == nil
 
@@ -534,16 +601,14 @@ defmodule Macaw.Auth.ContractTest do
     end
 
     @tag verifies: "auth-steps"
-    test "steps/0 in order; each step's page and sign-out; enrollment comes before a password change" do
-      assert Auth.steps() == [:second_factor, :second_factor_enroll, :password_change]
+    test "steps/0 in order; each step's page and sign-out; the second factor comes before a password change" do
+      assert Auth.steps() == [:second_factor, :password_change]
 
       for step <- Auth.steps(),
           do: assert(Auth.allowed_paths(step) == [Auth.path(step), Auth.path(:sign_out)])
 
-      user = user(%{second_factor: :required, must_change_password: true})
-
-      assert Auth.pending_step(user, session(%{second_factor_passed: false})) ==
-               :second_factor_enroll
+      user = user(%{second_factor: :enrolled, must_change_password: true})
+      assert Auth.pending_step(user, session(%{second_factor_passed: false})) == :second_factor
 
       assert Auth.pending_step(user, session(%{second_factor_passed: true})) == :password_change
       assert Auth.pending_step(user(%{must_change_password: true}), session()) == :password_change
@@ -570,7 +635,7 @@ defmodule Macaw.Auth.ContractTest do
     test "second_factor_passed is the option when given, else true only for :none" do
       Application.put_env(:macaw_auth, :backend, Recorder)
 
-      for {factor, passed} <- [none: true, enrolled: false, required: false] do
+      for {factor, passed} <- [none: true, enrolled: false] do
         Auth.create_session(user(%{second_factor: factor}))
         assert_received {:backend, {:create_session, _, opts}}
         assert Keyword.fetch!(opts, :second_factor_passed) == passed
@@ -579,6 +644,18 @@ defmodule Macaw.Auth.ContractTest do
       Auth.create_session(user(%{second_factor: :none}), second_factor_passed: false)
       assert_received {:backend, {:create_session, _, opts}}
       assert Keyword.fetch!(opts, :second_factor_passed) == false
+    end
+
+    @tag verifies: "create-session-enrollment-required"
+    test "a user owing enrollment gets no session, whatever the options, the backend never asked" do
+      Application.put_env(:macaw_auth, :backend, Recorder)
+
+      for opts <- [[], [second_factor_passed: true], [second_factor_passed: false]] do
+        assert Auth.create_session(user(%{second_factor: :required}), opts) ==
+                 {:error, :enrollment_required}
+      end
+
+      refute_received {:backend, _}
     end
   end
 

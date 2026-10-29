@@ -6,7 +6,15 @@ defmodule Macaw.Auth.Native.TotpTest do
 
   alias Macaw.Auth
   alias Macaw.Auth.Native
-  alias Macaw.Auth.Native.{Config, RecoveryCodeRecord, Seal, SealingKeyError, Totp, UserRecord}
+
+  alias Macaw.Auth.Native.{
+    Config,
+    RecoveryCodeRecord,
+    Seal,
+    SealingKeyError,
+    Totp,
+    UserRecord
+  }
 
   @t0 ~U[2026-10-01 12:00:00.000000Z]
   @key :crypto.strong_rand_bytes(32)
@@ -36,8 +44,8 @@ defmodule Macaw.Auth.Native.TotpTest do
   # their secret and recovery codes.
   defp enrolled!(attrs \\ %{}) do
     user = user!(attrs)
-    {:ok, %{secret: secret}} = Native.enroll_begin(user)
-    {:ok, codes} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+    {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
+    {:ok, codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
     {reload(user), secret, codes}
   end
 
@@ -144,33 +152,76 @@ defmodule Macaw.Auth.Native.TotpTest do
 
   describe "enrollment" do
     @tag verifies: "totp-enroll"
-    test "begins pending, resumes with the same secret, and confirms with a code" do
+    test "begins with a ticket, shows its secret again, and confirms with a code" do
       user = user!()
-      {:ok, %{secret: secret, uri: uri}} = Native.enroll_begin(user)
+      {:ok, %{ticket: ticket, secret: secret, uri: uri}} = Native.enroll_begin(user, now: @t0)
       assert byte_size(secret) == 20
-      assert {:ok, %{secret: ^secret}} = Native.enroll_begin(user)
+      assert Native.enrollment(ticket, now: at(60)) == {:ok, %{secret: secret, uri: uri}}
 
       assert uri ==
                "otpauth://totp/Test%20App:#{user.username}?secret=" <>
                  Base.encode32(secret, padding: false) <> "&issuer=Test%20App"
 
-      # Pending: nothing changes at sign-in.
+      # Begun: nothing changes at sign-in.
       assert reload(user).second_factor == :none
 
       # An hour off is outside the window.
-      assert Native.enroll_confirm(user, Totp.code(secret, at(3600)), now: @t0) ==
+      assert Native.enroll_confirm(user, ticket, Totp.code(secret, at(3600)), now: @t0) ==
                {:error, :invalid_code}
 
-      assert {:ok, codes} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+      assert {:ok, codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
       assert length(codes) == 10
       assert reload(user).second_factor == :enrolled
       assert Native.enroll_begin(user) == {:error, :already_enrolled}
-      assert Native.enroll_confirm(user, Totp.code(secret, @t0)) == {:error, :already_enrolled}
+
+      assert Native.enroll_confirm(user, ticket, Totp.code(secret, at(30)), now: at(30)) ==
+               {:error, :invalid_ticket}
     end
 
     @tag verifies: "totp-not-started"
-    test "confirming without beginning is refused" do
-      assert Native.enroll_confirm(user!(), "123456") == {:error, :not_started}
+    test "confirming needs the user's own ticket of its purpose" do
+      user = user!()
+      {:ok, %{ticket: other, secret: secret}} = Native.enroll_begin(user!(), now: @t0)
+      code = Totp.code(secret, @t0)
+
+      for refused <- [nil, "", "not a ticket", other] do
+        assert Native.enroll_confirm(user, refused, code, now: @t0) == {:error, :invalid_ticket}
+      end
+
+      assert reload(user).second_factor == :none
+    end
+
+    @tag verifies: "ticket-nothing-stored"
+    test "beginning stores nothing: no table holds the pending secret, or its sealed form" do
+      configure!(sealing_key: @key, totp_issuer: "Test App", totp_required: ["admin"])
+      chosen = user!()
+      owed = user!(%{roles: ["admin"]})
+
+      tables =
+        ~w(macaw_auth_users macaw_auth_sessions macaw_auth_recovery_codes macaw_auth_throttle)
+
+      before = for table <- tables, do: Repo.query!("SELECT * FROM #{table}").rows
+
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(chosen, now: @t0)
+      {:ok, owed_ticket} = Native.enrollment_ticket(owed, now: @t0)
+      {:ok, %{secret: owed_secret}} = Native.enrollment(owed_ticket, now: @t0)
+
+      assert for(table <- tables, do: Repo.query!("SELECT * FROM #{table}").rows) == before
+      assert row(chosen).totp_secret_sealed == nil
+      assert row(owed).totp_secret_sealed == nil
+
+      {:ok, %{secret: sealed}, _} = Totp.open_ticket(ticket, [:chosen], now: @t0)
+
+      stored =
+        for table <- tables,
+            value <- List.flatten(Repo.query!("SELECT * FROM #{table}").rows),
+            is_binary(value),
+            do: value
+
+      for s <- [secret, owed_secret],
+          form <- [s, Base.encode32(s, padding: false), sealed],
+          value <- stored,
+          do: refute(:binary.match(value, form) != :nomatch)
     end
 
     @tag verifies: "totp-enrolled-owes"
@@ -187,7 +238,9 @@ defmodule Macaw.Auth.Native.TotpTest do
       check all(n <- integer(1..5), max_runs: 10) do
         for _ <- 1..n do
           user = user!()
-          {:ok, %{secret: secret}} = Native.enroll_begin(user)
+          {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
+          assert row(user).totp_secret_sealed == nil
+          {:ok, _} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
           sealed = row(user).totp_secret_sealed
 
           for form <- [secret, Base.encode32(secret, padding: false), Base.encode64(secret)] do
@@ -232,15 +285,16 @@ defmodule Macaw.Auth.Native.TotpTest do
 
     @tag verifies: "seal-row-bound"
     test "a sealed secret copied onto another user's row doesn't unseal there" do
-      {alice, _secret, _} = enrolled!()
-      bob = user!()
-      {:ok, _} = Native.enroll_begin(bob)
+      {alice, secret, _} = enrolled!()
+      {bob, _secret, _} = enrolled!()
 
       Repo.update_all(where(UserRecord, id: ^bob.id),
         set: [totp_secret_sealed: row(alice).totp_secret_sealed]
       )
 
-      assert_raise SealingKeyError, fn -> Native.enroll_begin(bob) end
+      assert_raise SealingKeyError, fn ->
+        Totp.verify(bob, Totp.code(secret, at(300)), now: at(300))
+      end
     end
 
     @tag verifies: "seal-short-key-config"
@@ -339,7 +393,7 @@ defmodule Macaw.Auth.Native.TotpTest do
 
   describe "policy" do
     @tag verifies: "totp-policy-roles"
-    test "required by role: a user with the role who hasn't enrolled owes enrollment" do
+    test "required by role: a user with the role who hasn't enrolled gets a ticket, not a session" do
       configure!(sealing_key: @key, totp_required: ["admin"])
       admin = user!(%{roles: ["admin"]})
       viewer = user!(%{roles: ["viewer"]})
@@ -347,19 +401,23 @@ defmodule Macaw.Auth.Native.TotpTest do
       assert admin.second_factor == :required
       assert viewer.second_factor == :none
 
-      {:ok, token, session} = Auth.create_session(admin)
-      assert Auth.pending_step(admin, session) == :second_factor_enroll
+      assert Auth.create_session(admin) == {:error, :enrollment_required}
+      assert Auth.list_sessions(admin.id) == []
 
       {:ok, _, viewer_session} = Auth.create_session(viewer)
       assert Auth.pending_step(viewer, viewer_session) == nil
+      assert Auth.enrollment_ticket(viewer, now: @t0) == {:error, :invalid}
 
-      # Enrolling, then completing the step, leaves nothing owed; the user
-      # is now enrolled.
-      {:ok, %{secret: secret}} = Native.enroll_begin(admin)
-      {:ok, _} = Native.enroll_confirm(admin, Totp.code(secret, DateTime.utc_now()))
-      :ok = Auth.complete_step(session.id, :second_factor_enroll)
-      {:ok, admin, session} = Auth.fetch(token)
+      # Enrolling from the ticket makes the admin enrolled; a session then
+      # starts with its second factor passed, and owes nothing.
+      {:ok, ticket} = Auth.enrollment_ticket(admin, now: @t0)
+      {:ok, %{secret: secret}} = Auth.enrollment(ticket, now: @t0)
+
+      {:ok, admin, _codes} =
+        Auth.enroll_second_factor(ticket, Totp.code(secret, @t0), now: @t0)
+
       assert admin.second_factor == :enrolled
+      {:ok, _token, session} = Auth.create_session(admin, second_factor_passed: true)
       assert Auth.pending_step(admin, session) == nil
     end
 
@@ -459,12 +517,15 @@ defmodule Macaw.Auth.Native.TotpTest do
     @tag verifies: "throttle-code-enroll"
     test "enrollment confirmation and disabling are throttled too" do
       user = user!()
-      {:ok, %{secret: secret}} = Native.enroll_begin(user)
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
 
       for _ <- 1..5,
-          do: assert(Native.enroll_confirm(user, "000001", now: @t0) == {:error, :invalid_code})
+          do:
+            assert(
+              Native.enroll_confirm(user, ticket, "000001", now: @t0) == {:error, :invalid_code}
+            )
 
-      assert Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0) ==
+      assert Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0) ==
                {:error, :throttled}
     end
   end
@@ -564,8 +625,13 @@ defmodule Macaw.Auth.Native.TotpTest do
 
       # :now is the clock: the confirmation's time and step, the codes' time.
       fresh = user!()
-      {:ok, %{secret: fresh_secret}} = Native.enroll_begin(fresh)
-      {:ok, _} = Totp.enroll_confirm(fresh, Totp.code(fresh_secret, at(-3600)), now: at(-3600))
+      {:ok, %{ticket: ticket, secret: fresh_secret}} = Native.enroll_begin(fresh, now: at(-3600))
+      {:ok, term, record} = Totp.open_ticket(ticket, [:chosen], now: at(-3600))
+      assert term.issued_at == DateTime.to_unix(at(-3600))
+
+      {:ok, _} =
+        Totp.enroll_confirm({term, record}, Totp.code(fresh_secret, at(-3600)), now: at(-3600))
+
       assert row(fresh).totp_enabled_at == at(-3600)
       assert row(fresh).totp_last_step == Totp.step(at(-3600))
 
@@ -590,7 +656,7 @@ defmodule Macaw.Auth.Native.TotpTest do
       assert Totp.step(DateTime.from_unix!(1_111_111_109)) == div(1_111_111_109, 30)
 
       # A 160-bit secret.
-      {:ok, %{secret: secret}} = Native.enroll_begin(user!())
+      {:ok, %{secret: secret}} = Native.enroll_begin(user!(), now: @t0)
       assert byte_size(secret) == 20
 
       assert Totp.normalize(" ab-cd 12-\t3 ") == "ABCD123"
@@ -629,67 +695,69 @@ defmodule Macaw.Auth.Native.TotpTest do
       assert row(user).totp_last_step == step
       assert Totp.verify(user, @collide_code, now: @collide_now) == {:error, :invalid_code}
 
-      # A pending enrollment has nothing to claim.
+      # An enrollment begun but not confirmed has nothing to claim.
       pending = user!()
-      {:ok, _} = Native.enroll_begin(pending)
+      {:ok, _} = Native.enroll_begin(pending, now: @t0)
       assert Totp.claim_step(Repo, pending.id, step) == :replayed
       assert row(pending).totp_last_step == nil
     end
 
     @tag verifies: "auth-totp-enroll"
-    test "enrollment: sealed and pending, one secret of two first loads, a confirmation bound to its secret" do
+    test "enrollment: the secret sealed into the ticket, none stored, one of two racing confirmations" do
       user = user!()
-      {:ok, %{secret: secret, uri: uri}} = Native.enroll_begin(user)
+      {:ok, %{ticket: ticket, secret: secret, uri: uri}} = Native.enroll_begin(user, now: @t0)
 
-      # Sealed, and pending: nothing enabled.
-      assert {:ok, ^secret} =
-               Seal.unseal(
-                 row(user).totp_secret_sealed,
-                 Seal.key!(@key),
-                 "macaw_auth totp_secret " <> user.id
-               )
+      # The ticket carries the secret sealed as at rest, bound to the user;
+      # nothing is written.
+      {:ok, %{account_id: id, purpose: :chosen, secret: sealed}, _record} =
+        Totp.open_ticket(ticket, [:chosen], now: @t0)
 
+      assert id == user.id
+
+      assert Seal.unseal(sealed, Seal.key!(@key), "macaw_auth totp_secret " <> user.id) ==
+               {:ok, secret}
+
+      assert row(user).totp_secret_sealed == nil
       assert row(user).totp_enabled_at == nil
       assert uri =~ "otpauth://totp/Test%20App:#{user.username}?"
       assert uri =~ "issuer=Test%20App"
 
       assert Native.enroll_begin(%{user | id: Ecto.UUID.generate()}) == {:error, :not_found}
 
-      # Two first loads at once: the other caller's write lands between this
-      # one's read and its own; this one is shown the secret kept.
+      # Confirmed: the row holds the ticket's sealed secret, as it was.
+      {:ok, _} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
+      assert row(user).totp_secret_sealed == sealed
+
+      # Two confirmations of one ticket at once: the other's write lands
+      # between this one's read and its own; this one is refused.
       racer = user!()
+      {:ok, %{ticket: raced, secret: raced_secret}} = Native.enroll_begin(racer, now: @t0)
+      code = Totp.code(raced_secret, @t0)
       parent = self()
 
       after_first_query("macaw_auth_users", fn ->
-        send(parent, {:other, Native.enroll_begin(racer)})
+        send(parent, {:other, Native.enroll_confirm(racer, raced, code, now: @t0)})
       end)
 
-      {:ok, %{secret: shown}} = Native.enroll_begin(racer)
-      assert_received {:other, {:ok, %{secret: kept}}}
-      assert shown == kept
+      assert Native.enroll_confirm(racer, raced, code, now: @t0) == {:error, :invalid_ticket}
+      assert_received {:other, {:ok, [_ | _]}}
+      assert reload(racer).second_factor == :enrolled
+      assert Native.recovery_codes_left(racer) == 10
 
-      assert {:ok, ^kept} =
-               Seal.unseal(
-                 row(racer).totp_secret_sealed,
-                 Seal.key!(@key),
-                 "macaw_auth totp_secret " <> racer.id
-               )
-
-      # Restarted between the confirmation's read and its write (reset, then
-      # begun again): the old secret's code doesn't confirm the new one.
-      restarted = user!()
-      {:ok, %{secret: old}} = Native.enroll_begin(restarted)
+      # Disabled between the confirmation's read and its write: refused,
+      # nothing enabled.
+      disabled = user!()
+      {:ok, %{ticket: late, secret: late_secret}} = Native.enroll_begin(disabled, now: @t0)
 
       after_first_query("macaw_auth_users", fn ->
-        :ok = Native.admin_reset(restarted)
-        {:ok, _} = Native.enroll_begin(restarted)
+        {:ok, _} = Native.disable_user(disabled.username)
       end)
 
-      assert Native.enroll_confirm(restarted, Totp.code(old, @t0), now: @t0) ==
-               {:error, :not_started}
+      assert Native.enroll_confirm(disabled, late, Totp.code(late_secret, @t0), now: @t0) ==
+               {:error, :invalid_ticket}
 
-      assert reload(restarted).second_factor == :none
-      assert Native.recovery_codes_left(restarted) == 0
+      assert row(disabled).totp_enabled_at == nil
+      assert Native.recovery_codes_left(disabled) == 0
     end
 
     @tag verifies: "auth-totp-seal"
@@ -715,8 +783,8 @@ defmodule Macaw.Auth.Native.TotpTest do
       # The function is called at each use.
       counter = :counters.new(1, [])
       configure!(sealing_key: {__MODULE__, :counted_key, [counter, Base.encode64(@key)]})
-      {:ok, _} = Native.enroll_begin(user!())
-      {:ok, _} = Native.enroll_begin(user!())
+      {:ok, _} = Native.enroll_begin(user!(), now: @t0)
+      {:ok, _} = Native.enroll_begin(user!(), now: @t0)
       assert :counters.get(counter, 1) == 2
 
       # A short literal key at use, and a function's: named, never shown.
@@ -764,9 +832,9 @@ defmodule Macaw.Auth.Native.TotpTest do
       assert Native.verify_second_factor(session.id, Totp.code(secret, at(4230)), now: at(4230)) ==
                {:error, :disabled}
 
-      # Not enrolled (pending), replayed, junk: one refusal.
+      # Not enrolled (begun, not confirmed), replayed, junk: one refusal.
       pending = user!()
-      {:ok, %{secret: pending_secret}} = Native.enroll_begin(pending)
+      {:ok, %{secret: pending_secret}} = Native.enroll_begin(pending, now: @t0)
 
       assert Totp.verify(pending, Totp.code(pending_secret, at(300)), now: at(300)) ==
                {:error, :invalid_code}
@@ -828,7 +896,7 @@ defmodule Macaw.Auth.Native.TotpTest do
     end
 
     @tag verifies: "auth-totp-disable"
-    test "turning it off: with a recovery code, everything cleared; an admin's reset of a pending one" do
+    test "turning it off: with a recovery code, everything cleared; an admin's reset of one never enrolled" do
       {user, _secret, [code | _]} = enrolled!()
       assert Native.disable(user, code, now: at(300)) == :ok
       cleared = row(user)
@@ -839,9 +907,9 @@ defmodule Macaw.Auth.Native.TotpTest do
       assert Native.recovery_codes_left(user) == 0
       assert Native.disable(user, code, now: at(330)) == {:error, :invalid_code}
 
-      # An administrator's reset, of a pending enrollment, revokes with its reason.
+      # An administrator's reset, of a user who only began, revokes with its reason.
       pending = user!()
-      {:ok, _} = Native.enroll_begin(pending)
+      {:ok, _} = Native.enroll_begin(pending, now: @t0)
       {:ok, token, _} = Native.create_session(pending, [])
       ref = capture_events([[:macaw_auth, :native, :session]])
 
@@ -859,8 +927,8 @@ defmodule Macaw.Auth.Native.TotpTest do
       ref = capture_events([[:macaw_auth, :native, :second_factor]])
 
       user = user!()
-      {:ok, %{secret: secret}} = Native.enroll_begin(user)
-      {:ok, codes} = Native.enroll_confirm(user, Totp.code(secret, @t0), now: @t0)
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: @t0)
+      {:ok, codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, @t0), now: @t0)
       :ok = Totp.verify(user, Totp.code(secret, at(300)), now: at(300))
       {:error, :invalid_code} = Totp.verify(user, "000000", now: at(300))
       :ok = Totp.verify(user, hd(codes))

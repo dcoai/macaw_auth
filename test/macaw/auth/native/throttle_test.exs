@@ -438,15 +438,15 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       t0 = at(0)
       user = "hal" |> local_user!("correct horse battery") |> Native.to_user()
 
-      # Not started: refused, and not counted.
-      assert Native.enroll_confirm(user, "000001", now: t0, remote_ip: "192.0.2.95") ==
-               {:error, :not_started}
+      # No ticket: refused, and not counted.
+      assert Native.enroll_confirm(user, nil, "000001", now: t0, remote_ip: "192.0.2.95") ==
+               {:error, :invalid_ticket}
 
       assert rows() == []
 
-      {:ok, %{secret: secret}} = Native.enroll_begin(user)
+      {:ok, %{ticket: ticket, secret: secret}} = Native.enroll_begin(user, now: t0)
       opts = [now: t0, remote_ip: "192.0.2.95"]
-      assert Native.enroll_confirm(user, "000001", opts) == {:error, :invalid_code}
+      assert Native.enroll_confirm(user, ticket, "000001", opts) == {:error, :invalid_code}
 
       # The account's own second-factor key, by its id.
       assert row({:user, {:second_factor, user.id}}) == [
@@ -456,7 +456,7 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       assert row({:user, {:account, user.id}}) == []
 
       # An accepted code resets the account's second-factor key, never the address.
-      assert {:ok, _codes} = Native.enroll_confirm(user, Totp.code(secret, t0), opts)
+      assert {:ok, _codes} = Native.enroll_confirm(user, ticket, Totp.code(secret, t0), opts)
       assert row({:user, {:second_factor, user.id}}) == []
       assert [{_, 1, _}] = row({:ip, "192.0.2.95"})
 

@@ -23,9 +23,10 @@ end
 
 ## 1. The session keys {#auth-plug-keys}
 
-Three keys of the Plug session:
+Five keys of the Plug session:
 - **`"macaw_auth_token"`**, the session's token (`Macaw.Auth.Plug.token_key/0` gives it, for hosts that pass it to LiveView's session, where the hooks read it ([03 §1](03-live.md#auth-live-mount-user)));
 - **`"macaw_auth_return_to"`**, the path a signed-out visitor was going to (§3.1);
+- **`"macaw_auth_enrollment_ticket"`** and **`"macaw_auth_enrollment_remember"`**, while a user who owes enrollment holds no session: the enrollment ticket (sealed bytes, [01 §2.10](01-contract.md#auth-backend-enroll)) and whether sign-in asked to remember the browser, put by `log_in/3` (§7.3) and gone once `enroll_second_factor/2` starts the session (§8.1);
 - **`"live_socket_id"`**, the session's socket id, `"macaw_auth_sessions:<session id>"` (`Macaw.Auth.live_socket_id/1`), put at sign-in (§7) and when a remembered session is restored (§10.2). Phoenix reads it under this name and names the session's LiveView sockets by it, so a revocation can disconnect them ([01 §6](01-contract.md#auth-revocation)).
 
 Nothing else of the session is the library's. Besides the session, the library owns one cookie, the remember cookie (§10).
@@ -154,7 +155,7 @@ a signed-in request to /login is sent home; a signed-out one passes unhalted
 
 ## 7. Signing in and out {#auth-plug-log-in}
 
-`Macaw.Auth.Plug.log_in/3` (`conn`, `user`, `opts`) starts a session for a user who passed `Macaw.Auth.authenticate/2`:
+`Macaw.Auth.Plug.log_in/3` (`conn`, `user`, `opts`) signs in a user who passed `Macaw.Auth.authenticate/2`. **A user who owes enrollment** (`second_factor: :required`) **gets no session** (§7.3); any other user's session:
 1. **creates the session** (`Macaw.Auth.create_session/2`) with `:remote_ip` (the conn's, as a string) and `:user_agent` (the first `user-agent` header), which `opts` may override or add to (every option but `:remember` goes to `create_session/2`);
 2. **renews the session** (`configure_session(renew: true)`, a new session id, so a fixated one is useless) **and clears it,** keeping only the return path;
 3. **stores the token** under `"macaw_auth_token"`, and **the session's `live_socket_id`** under `"live_socket_id"` (§1);
@@ -196,7 +197,7 @@ log_out revokes the session (its token no longer resolves), a subscriber hears {
 
 ### 7.2 Completing a step {#auth-plug-complete-step}
 
-`Macaw.Auth.Plug.complete_step/2` (`conn`, `step`) records a step the current session completed (`Macaw.Auth.complete_step/3`), re-reads the session by id, reassigns user, session and pending step, and continues (§7.1). **A session the backend refuses the step for** (`{:error, :invalid}`, revoked meanwhile, [01 §2.6](01-contract.md#auth-backend-complete-step)), **or that no longer resolves,** is logged out (§7). Enrollment's page calls it with `:second_factor_enroll` after the backend confirmed the enrollment, and the password page with `:password_change`.
+`Macaw.Auth.Plug.complete_step/2` (`conn`, `step`) records a step the current session completed (`Macaw.Auth.complete_step/3`), re-reads the session by id, reassigns user, session and pending step, and continues (§7.1). **A session the backend refuses the step for** (`{:error, :invalid}`, revoked meanwhile, [01 §2.6](01-contract.md#auth-backend-complete-step)), **or that no longer resolves,** is logged out (§7). The password page calls it with `:password_change`. Enrollment is no step: its page starts the session instead (§8.1).
 
 ```test:plug-complete-step
 a session owing :second_factor, after complete_step(conn, :second_factor), has a nil pending step and is redirected home
@@ -204,6 +205,20 @@ a session owing :second_factor, after complete_step(conn, :second_factor), has a
 
 ```test:plug-complete-step-revoked
 a session revoked after the request was fetched, after complete_step(conn, :password_change), is halted with 302 to the sign-in path, its session holding no token
+```
+
+### 7.3 A user who owes enrollment {#auth-plug-log-in-ticket}
+
+For a user whose `second_factor` is `:required`, `log_in/3` starts **no session** (v0.5.0; before, it started one that owed `:second_factor_enroll`, a path removed with no mode to keep it):
+1. **asks for the enrollment ticket** (`Macaw.Auth.enrollment_ticket/2`, every option but `:remember` passed on);
+2. **renews and clears the session,** keeping only the return path, and **stores the ticket** under `"macaw_auth_enrollment_ticket"` and the `remember:` choice under `"macaw_auth_enrollment_remember"` (§1), so the session that enrollment starts is remembered as sign-in asked;
+3. **deletes a remember cookie the browser sent,** so an older session's cookie can't sign this browser in meanwhile; puts no token and no `live_socket_id`; assigns `:current_user`, `:current_session` and `:pending_step` nil;
+4. **redirects to the enrollment page,** `path(:second_factor_enroll)`, halted. That page is a signed-out page (outside `require_authenticated/2`): it shows `enrollment/1` and submits to `enroll_second_factor/2` (§8.1).
+
+When the backend refuses the ticket (`{:error, :invalid}`: the user is gone, disabled or no longer owes enrollment), the sign-in fails as a refused session does (§7): the flash, the sign-in page, nothing touched.
+
+```test:plug-log-in-ticket
+log_in of a :required user from /login with a return path is halted with 302 to /second-factor/enroll, the session renewed, holding a binary ticket and the return path and no token or live_socket_id; the assigns are nil and the backend lists no session; a remember cookie the browser sent is deleted
 ```
 
 ## 8. The second factor's page {#auth-plug-verify}
@@ -228,6 +243,35 @@ with a valid code, verify_second_factor/2 gives {:ok, conn} redirected to the re
 
 ```test:plug-verify-refused
 with "not a code", {:error, :invalid_code, conn}, unhalted, pending step still :second_factor; with no current session, {:error, :invalid, conn}
+```
+
+### 8.1 The enrollment page {#auth-plug-enroll}
+
+The page a user owing enrollment reaches with a ticket and no session (§7.3):
+- **`Macaw.Auth.Plug.enrollment/1`** (`conn`) gives what to show of the session's ticket (`Macaw.Auth.enrollment/2`): `{:ok, %{secret, uri}}`, the secret and the `otpauth://` URI for the QR code, the same on each reload, or `{:error, :invalid_ticket}` when the session holds none or the backend refuses it (expired, tampered, spent, its account disabled), and the page sends the browser to sign in.
+- **`Macaw.Auth.Plug.enroll_second_factor/2`** (`conn`, `code`) completes the enrollment with the submitted code (`Macaw.Auth.enroll_second_factor/3`, the conn's address as `:remote_ip` for the backend's throttle) and **only then starts the session** (`Macaw.Auth.create_session/2` with `second_factor_passed: true` and the conn's `:remote_ip` and `:user_agent`), as `log_in/3` starts one (§7): renewed and cleared but for the return path (so the ticket is gone), the token and `live_socket_id` stored, the remember cookie set when sign-in asked for it, the assigns set. `{:ok, recovery_codes, conn}`, **not redirected**, for the page to show the codes once; its next request goes on as any signed-in one (`continue/1` sends it where it was going).
+- **Refused,** `{:error, reason, conn}`, unhalted, for the page to render: `:invalid_code` or `:throttled`, the ticket kept to try again; `:invalid_ticket` (none in the session, or refused), the ticket deleted from the session; `:invalid`, the user deleted as the enrollment completed.
+
+```elixir
+def create(conn, %{"code" => code}) do
+  case Macaw.Auth.Plug.enroll_second_factor(conn, code) do
+    {:ok, codes, conn} -> render(conn, :recovery_codes, codes: codes)
+    {:error, :invalid_ticket, conn} -> redirect(conn, to: ~p"/login")
+    {:error, reason, conn} -> render(conn, :new, error: reason)
+  end
+end
+```
+
+```test:plug-enrollment
+after log_in of a :required user, enrollment/1 of the next request gives a binary secret and an otpauth://totp/ uri; with no ticket, or a junk one, {:error, :invalid_ticket}
+```
+
+```test:plug-enroll-ok
+with a valid code, enroll_second_factor/2 gives {:ok, codes, conn} unhalted, the session renewed, the ticket gone, the return path kept, a token resolving to an :enrolled user with second_factor_passed and the live_socket_id of its session, nothing pending, the remember cookie set as log_in(remember: true) asked; continue/1 then goes to the return path; no session existed before
+```
+
+```test:plug-enroll-refused
+a wrong code is {:error, :invalid_code, conn} unhalted with the ticket kept; a junk ticket is {:error, :invalid_ticket, conn} with it deleted; no ticket, {:error, :invalid_ticket, conn} with the conn as it came; and the user has no session
 ```
 
 ## 9. Redirects stay on the site {#auth-plug-site-path}

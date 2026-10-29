@@ -648,10 +648,10 @@ defmodule Macaw.Auth.Native.SessionsTest do
     end
 
     @tag verifies: "auth-sessions-steps"
-    test "both second-factor steps pass it; a completed step is :ok without a write; names are stored as text" do
+    test "the second-factor step passes it; a completed step is :ok without a write; names are stored as text" do
       user = user!()
       {:ok, _, session} = Sessions.create(user, second_factor_passed: false, now: @t0)
-      :ok = Sessions.complete_step(session.id, :second_factor_enroll, now: at(1))
+      :ok = Sessions.complete_step(session.id, :second_factor, now: at(1))
       assert %{second_factor_passed: true, updated_at: updated} = row(session)
       assert updated == at(1)
 

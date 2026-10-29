@@ -24,7 +24,8 @@ defmodule Macaw.Auth.Native do
   - `Macaw.Auth.Native.Sessions`: hashed session tokens, idle expiry,
     steps;
   - `Macaw.Auth.Native.Totp`: the second factor, TOTP and recovery codes,
-    its secret sealed at rest (`Macaw.Auth.Native.Seal`);
+    its secret sealed at rest (`Macaw.Auth.Native.Seal`), an enrollment
+    carried by a sealed ticket (`Macaw.Auth.Native.Ticket`);
   - `Macaw.Auth.Native.UserRecord`, `Macaw.Auth.Native.SessionRecord`,
     `Macaw.Auth.Native.RecoveryCodeRecord` and
     `Macaw.Auth.Native.ThrottleRecord`: the `macaw_auth_users`,
@@ -41,7 +42,11 @@ defmodule Macaw.Auth.Native do
   **The second factor.** A user's `second_factor` is `:enrolled` once they
   confirm a TOTP enrollment, else `:required` when policy
   (`totp_required`) requires one, else `:none`; `Macaw.Auth.pending_step/2`
-  turns that into the step a session owes. The enrollment and
+  turns that into the step a session owes. A `:required` account gets no
+  session: signing in gives it an enrollment ticket
+  (`enrollment_ticket/2`), sealed, ten minutes long, carrying the pending
+  secret, and completing the enrollment from the ticket
+  (`enroll_second_factor/3`) is what lets a session start. The enrollment and
   verification functions here put every code check behind the throttle:
   a wrong code is a failure for the account's second-factor key and the
   client's address, with the same backoff as a wrong password, so six
@@ -189,31 +194,98 @@ defmodule Macaw.Auth.Native do
   def verify_second_factor(session_id, code, opts \\ []) do
     with {:ok, user, _session} <-
            Sessions.fetch_by_id(session_id, Keyword.put(opts, :touch, false)),
-         :ok <- throttled(user, opts, fn -> Totp.verify(user, code, opts) end) do
+         :ok <- throttled(user.id, opts, fn -> Totp.verify(user, code, opts) end) do
       Sessions.complete_step(session_id, :second_factor, opts)
     end
   end
 
-  @doc """
-  Starts (or resumes) `user`'s TOTP enrollment: `{:ok, %{secret, uri}}`,
-  the `otpauth://` URI for the page's QR code. Not active until
-  `enroll_confirm/3`. See `Macaw.Auth.Native.Totp.enroll_begin/2`.
-  """
-  @spec enroll_begin(User.t(), keyword()) ::
-          {:ok, %{secret: binary(), uri: String.t()}} | {:error, :already_enrolled | :not_found}
-  def enroll_begin(%User{} = user, opts \\ []), do: Totp.enroll_begin(user, opts)
+  # ── Enrollment by ticket ──────────────────────────────────────────────
+  #
+  # Nothing unconfirmed is stored: the pending secret travels sealed in an
+  # enrollment ticket (`Macaw.Auth.Native.Ticket`), which the client holds.
 
   @doc """
-  Confirms the enrollment with a valid code, behind the throttle:
-  `{:ok, recovery_codes}` to show once, or `{:error, :invalid_code |
-  :throttled | :not_started | :already_enrolled}`. A session that owed
-  `:second_factor_enroll` then completes it (`Macaw.Auth.Plug.complete_step/2`).
+  The ticket an account that owes enrollment at sign-in gets instead of a
+  session (`Macaw.Auth.Plug.log_in/3`): `{:ok, ticket}`, purpose `:owed`,
+  for an enabled account that policy requires to enroll and that hasn't;
+  `{:error, :invalid}` for any other. Option `:now`.
   """
-  @spec enroll_confirm(User.t(), term(), keyword()) ::
-          {:ok, [String.t()]}
-          | {:error, :invalid_code | :throttled | :not_started | :already_enrolled}
-  def enroll_confirm(%User{} = user, code, opts \\ []),
-    do: throttled(user, opts, fn -> Totp.enroll_confirm(user, code, opts) end)
+  @impl Macaw.Auth.Backend
+  @spec enrollment_ticket(User.t(), keyword()) :: {:ok, binary()} | {:error, :invalid}
+  def enrollment_ticket(%User{} = user, opts \\ []) do
+    case Totp.enroll_begin(user, :owed, opts) do
+      {:ok, %{ticket: ticket}} -> {:ok, ticket}
+      {:error, _not_owed} -> {:error, :invalid}
+    end
+  end
+
+  @doc """
+  What an enrollment page shows of a ticket, of either purpose:
+  `{:ok, %{secret, uri}}`, the `otpauth://` URI for its QR code, or
+  `{:error, :invalid_ticket}` (`Macaw.Auth.Native.Totp.enrollment/2`).
+  """
+  @impl Macaw.Auth.Backend
+  @spec enrollment(term(), keyword()) ::
+          {:ok, %{secret: binary(), uri: String.t()}} | {:error, :invalid_ticket}
+  def enrollment(ticket, opts \\ []), do: Totp.enrollment(ticket, opts)
+
+  @doc """
+  Completes the enrollment an `:owed` ticket carries, from the ticket
+  alone, behind the throttle (the account's second-factor key):
+  `{:ok, user, recovery_codes}`, the user now `:enrolled` and the codes to
+  show once; the caller starts the session (`Macaw.Auth.Plug.enroll_second_factor/2`).
+  Or `{:error, :invalid_code | :throttled | :invalid_ticket}`: a ticket
+  expired, tampered, of the other purpose, spent (its account enrolled
+  since), or whose account is gone, disabled or no longer required to
+  enroll. Options: `:remote_ip`, `:now`.
+  """
+  @impl Macaw.Auth.Backend
+  @spec enroll_second_factor(term(), term(), keyword()) ::
+          {:ok, User.t(), [String.t()]} | {:error, :invalid_code | :throttled | :invalid_ticket}
+  def enroll_second_factor(ticket, code, opts \\ []) do
+    %Config{repo: repo} = Config.get()
+
+    with {:ok, term, record} <- Totp.open_ticket(ticket, [:owed], opts),
+         {:ok, codes} <-
+           throttled(record.id, opts, fn -> Totp.enroll_confirm({term, record}, code, opts) end) do
+      case repo.get(UserRecord, record.id) do
+        %UserRecord{} = enrolled -> {:ok, to_user(enrolled), codes}
+        nil -> {:error, :invalid_ticket}
+      end
+    end
+  end
+
+  @doc """
+  Begins an enrollment `user` chooses (a signed-in user's account page):
+  `{:ok, %{ticket, secret, uri}}`, the ticket (purpose `:chosen`) for the
+  page to keep, and the secret and `otpauth://` URI to show; a reload
+  shows the ticket's again with `enrollment/2`. Nothing is stored until
+  `enroll_confirm/4`. `{:error, :already_enrolled | :not_found |
+  :disabled}`. See `Macaw.Auth.Native.Totp.enroll_begin/3`.
+  """
+  @spec enroll_begin(User.t(), keyword()) ::
+          {:ok, %{ticket: binary(), secret: binary(), uri: String.t()}}
+          | {:error, :already_enrolled | :not_found | :disabled}
+  def enroll_begin(%User{} = user, opts \\ []), do: Totp.enroll_begin(user, :chosen, opts)
+
+  @doc """
+  Confirms `user`'s chosen enrollment, from its `:chosen` ticket, with a
+  valid code, behind the throttle: `{:ok, recovery_codes}` to show once,
+  or `{:error, :invalid_code | :throttled | :invalid_ticket}`, the ticket
+  refused as `enroll_second_factor/3` refuses one, and also when it is
+  another account's.
+  """
+  @spec enroll_confirm(User.t(), term(), term(), keyword()) ::
+          {:ok, [String.t()]} | {:error, :invalid_code | :throttled | :invalid_ticket}
+  def enroll_confirm(%User{id: id}, ticket, code, opts \\ []) do
+    case Totp.open_ticket(ticket, [:chosen], opts) do
+      {:ok, %{account_id: ^id} = term, record} ->
+        throttled(id, opts, fn -> Totp.enroll_confirm({term, record}, code, opts) end)
+
+      _refused ->
+        {:error, :invalid_ticket}
+    end
+  end
 
   @doc """
   The user turns their second factor off with a current code or a recovery
@@ -223,7 +295,7 @@ defmodule Macaw.Auth.Native do
   @spec disable(User.t(), term(), keyword()) ::
           :ok | {:error, :invalid_code | :throttled | :required}
   def disable(%User{} = user, code, opts \\ []),
-    do: throttled(user, opts, fn -> Totp.disable(user, code, opts) end)
+    do: throttled(user.id, opts, fn -> Totp.disable(user, code, opts) end)
 
   @doc """
   An administrator clears a user's second factor and revokes their sessions,
@@ -245,7 +317,7 @@ defmodule Macaw.Auth.Native do
   # A code check behind the throttle: refused unchecked while the account's
   # second-factor key or the address waits; a wrong code is a failure, an
   # accepted one resets the account's second-factor key.
-  defp throttled(%User{id: id}, opts, check) do
+  defp throttled(id, opts, check) do
     key = {:second_factor, id}
     ip = address(Keyword.get(opts, :remote_ip))
     now = clock(opts)

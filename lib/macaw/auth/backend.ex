@@ -1,6 +1,7 @@
 defmodule Macaw.Auth.Backend do
   @moduledoc """
-  What a backend implements: who someone is, and their sessions. Nothing
+  What a backend implements: who someone is, their sessions, and their
+  second factor (verifying it, and enrolling one by ticket). Nothing
   else. The plugs, hooks, steps, paths and the revocation push are
   `Macaw.Auth`'s, the same for every backend, so a backend never
   reimplements them. And one check: `check_config!/0`, which the
@@ -14,11 +15,15 @@ defmodule Macaw.Auth.Backend do
   - store no more than a hash of a session token;
   - spend the same time refusing an unknown user as a wrong password, and
     give both the same refusal;
-  - refuse a disabled user's sessions, and expire idle ones.
+  - refuse a disabled user's sessions, and expire idle ones;
+  - store nothing of an enrollment before it is confirmed: the pending
+    secret travels in the ticket, refused after ten minutes, once spent,
+    or once its account is disabled.
 
   The conformance kit (`Macaw.Auth.Conformance`) checks what it can of
   these: no token stored as it is, the same refusal, disabled and idle
-  sessions refused. It does not check timing; a backend's own suite does.
+  sessions refused, an expired, tampered, spent or disabled account's
+  ticket refused. It does not check timing; a backend's own suite does.
   """
 
   alias Macaw.Auth.{Session, User}
@@ -73,7 +78,7 @@ defmodule Macaw.Auth.Backend do
 
   @doc """
   Records that a session has completed a step (`:second_factor`,
-  `:password_change`): `:ok`, or `{:error, :invalid}` when the session
+  `:password_change`, `Macaw.Auth.steps/0`): `:ok`, or `{:error, :invalid}` when the session
   doesn't exist (revoked meanwhile), never a raise.
   """
   @callback complete_step(term(), Macaw.Auth.step(), opts()) :: :ok | {:error, :invalid}
@@ -88,6 +93,39 @@ defmodule Macaw.Auth.Backend do
   """
   @callback verify_second_factor(term(), term(), opts()) ::
               :ok | {:error, :invalid_code | :throttled | :invalid | :expired | :disabled}
+
+  @doc """
+  Issues the enrollment ticket for a user who owes enrollment at sign-in
+  (`second_factor: :required`), in place of a session: `{:ok, ticket}`,
+  bytes the client holds, sealed so that they can do nothing but enroll
+  that account for a short while; or `{:error, :invalid}` for a user who
+  owes none. Nothing unconfirmed is stored. A backend without a second
+  factor never reports `:required`, and answers `{:error, :unsupported}`.
+  Option `:now`.
+  """
+  @callback enrollment_ticket(User.t(), opts()) :: {:ok, binary()} | {:error, atom()}
+
+  @doc """
+  What the enrollment page shows of a ticket: `{:ok, %{secret, uri}}`, a
+  TOTP secret (RFC 6238: SHA-1, six digits, 30 seconds) and its
+  `otpauth://` URI, or `{:error, :invalid_ticket}` for one expired,
+  tampered, of another purpose, spent, or whose account is disabled or no
+  longer owes enrollment. Option `:now`.
+  """
+  @callback enrollment(term(), opts()) ::
+              {:ok, %{secret: binary(), uri: String.t()}} | {:error, atom()}
+
+  @doc """
+  Completes the enrollment a ticket carries, from the ticket alone, with a
+  valid code for its secret, behind the backend's throttle:
+  `{:ok, user, recovery_codes}`, the user now `:enrolled`; or
+  `{:error, :invalid_code | :throttled | :invalid_ticket}`, a ticket
+  refused as `enrollment/2` refuses one. A ticket is spent by the
+  enrollment it completes: a second confirmation is `:invalid_ticket`.
+  Options: `:remote_ip`, `:now`.
+  """
+  @callback enroll_second_factor(term(), term(), opts()) ::
+              {:ok, User.t(), [String.t()]} | {:error, atom()}
 
   @doc """
   Checks the backend's whole configuration, as its first sign-in would

@@ -17,9 +17,14 @@ defmodule Macaw.Auth do
   (`Macaw.Auth.Live`). Everything here is the same for every backend:
 
   - **Steps.** A session may owe steps before the app is open to it, in
-    order: a second factor (an enrolled user), enrolling one (policy
-    requires it), a password change. Meanwhile only that step's page and
-    sign-out are reachable.
+    order: a second factor (an enrolled user), a password change.
+    Meanwhile only that step's page and sign-out are reachable.
+  - **Enrollment owed at sign-in has no session.** A user whom policy
+    requires to enroll a second factor (`second_factor: :required`) gets
+    an enrollment ticket instead (`enrollment_ticket/2`), sealed and short
+    lived, that can do nothing but enroll; enrolling from it
+    (`enroll_second_factor/3`) gives the enrolled user, for whom a session
+    may then start. `create_session/2` refuses such a user.
   - **Revocation reaches open pages.** Every revocation goes through
     `revoke/2`, which tells each open LiveView of the user's sessions, so a
     revoked page disconnects at once. Without `:pubsub` that is this node
@@ -37,9 +42,9 @@ defmodule Macaw.Auth do
 
   alias Macaw.Auth.{Session, User}
 
-  @type step :: :second_factor | :second_factor_enroll | :password_change
+  @type step :: :second_factor | :password_change
 
-  @steps [:second_factor, :second_factor_enroll, :password_change]
+  @steps [:second_factor, :password_change]
 
   @default_paths %{
     sign_in: "/login",
@@ -81,18 +86,20 @@ defmodule Macaw.Auth do
   def steps, do: @steps
 
   @doc """
-  The step a session owes before the app, or nil: a second factor (an
-  enrolled user who hasn't passed it this session), enrolling one (policy
-  requires it), then a password change.
+  The step a session owes before the app, or nil: a second factor (a user
+  with one, who hasn't passed it this session), then a password change.
+
+  A session's user owing enrollment (`:required`) owes the second factor
+  too, which no code passes: no session is started for such a user
+  (`create_session/2`), so one can only be a session from before policy
+  required it, and it leads nowhere but sign-out. Signing in again gives
+  the enrollment ticket.
   """
   @spec pending_step(User.t(), Session.t()) :: step() | nil
   def pending_step(%User{} = user, %Session{} = session) do
     cond do
-      not session.second_factor_passed and user.second_factor == :enrolled ->
+      not session.second_factor_passed and user.second_factor != :none ->
         :second_factor
-
-      not session.second_factor_passed and user.second_factor == :required ->
-        :second_factor_enroll
 
       user.must_change_password and :password_change not in session.completed_steps ->
         :password_change
@@ -112,15 +119,56 @@ defmodule Macaw.Auth do
 
   @doc """
   Starts a session. The second factor counts as passed unless the user has
-  one enrolled or required, which the session then owes. `{:error,
-  :invalid}` when the backend refuses it (the user no longer exists).
+  one enrolled, which the session then owes. `{:error, :invalid}` when the
+  backend refuses it (the user no longer exists).
+
+  A user who owes enrollment (`second_factor: :required`) gets no session,
+  whatever the options say: `{:error, :enrollment_required}`, without
+  asking the backend. They get an enrollment ticket instead
+  (`enrollment_ticket/2`).
   """
   @spec create_session(User.t(), keyword()) ::
-          {:ok, binary(), Session.t()} | {:error, :invalid}
-  def create_session(%User{} = user, opts \\ []) do
+          {:ok, binary(), Session.t()} | {:error, :invalid | :enrollment_required}
+  def create_session(user, opts \\ [])
+
+  def create_session(%User{second_factor: :required}, _opts), do: {:error, :enrollment_required}
+
+  def create_session(%User{} = user, opts) do
     passed = Keyword.get(opts, :second_factor_passed, user.second_factor == :none)
     backend().create_session(user, Keyword.put(opts, :second_factor_passed, passed))
   end
+
+  @doc """
+  The enrollment ticket for a user who owes enrollment
+  (`second_factor: :required`), issued in place of a session:
+  `{:ok, ticket}`, sealed bytes for the client to hold, or
+  `{:error, :invalid}` for a user who doesn't owe one (gone, disabled,
+  enrolled, not required). Option `:now`.
+  """
+  @spec enrollment_ticket(User.t(), keyword()) :: {:ok, binary()} | {:error, atom()}
+  def enrollment_ticket(%User{} = user, opts \\ []),
+    do: backend().enrollment_ticket(user, opts)
+
+  @doc """
+  What the enrollment page shows of a ticket: `{:ok, %{secret, uri}}`, the
+  TOTP secret and its `otpauth://` URI (the QR code), or
+  `{:error, :invalid_ticket}`. Option `:now`.
+  """
+  @spec enrollment(term(), keyword()) ::
+          {:ok, %{secret: binary(), uri: String.t()}} | {:error, atom()}
+  def enrollment(ticket, opts \\ []), do: backend().enrollment(ticket, opts)
+
+  @doc """
+  Completes the enrollment a ticket carries with a valid code:
+  `{:ok, user, recovery_codes}`, the user now `:enrolled` (a session may
+  start for them, its second factor passed) and the codes to show once;
+  or `{:error, :invalid_code | :throttled | :invalid_ticket}`. Options:
+  `:remote_ip` (for the throttle), `:now`.
+  """
+  @spec enroll_second_factor(term(), term(), keyword()) ::
+          {:ok, User.t(), [String.t()]} | {:error, atom()}
+  def enroll_second_factor(ticket, code, opts \\ []),
+    do: backend().enroll_second_factor(ticket, code, opts)
 
   @doc "Resolves a token: `{:ok, user, session}` or `{:error, reason}`."
   @spec fetch(binary() | nil, keyword()) :: {:ok, User.t(), Session.t()} | {:error, atom()}
