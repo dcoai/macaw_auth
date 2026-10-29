@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 (2026-10-29)
+
+Breaking. What apu needs to move onto macaw_auth (macaw#93, #101), the external id as a term (macaw#188), and `macaw_host ~> 0.3.0`.
+
+**Upgrading a host:** run `mix macaw_auth.gen.migration` and migrate (two new migrations: the throttle table, then the external id column) before upgrading; enrollment pages use `Plug.enrollment/1` and `Plug.enroll_second_factor/2` (the ticket); set `public_url` if a proxy terminates TLS.
+
+- Takes `macaw_host ~> 0.3.0`: its release protocol, all `macaw_auth` uses, is unchanged.
 
 - **Breaking: enrollment owed at sign-in has no session; it is carried by a sealed ticket, and nothing unconfirmed is stored.** A user whom policy requires to enroll a second factor (`second_factor: :required`) gets no session when their password is accepted: `Macaw.Auth.Plug.log_in/3` puts an enrollment ticket in the Plug session instead (`"macaw_auth_enrollment_ticket"`), deletes a remember cookie the browser sent, assigns nothing, and redirects to `path(:second_factor_enroll)`. The ticket is a term (account id, purpose, issue time, the pending TOTP secret sealed as at rest), sealed with `Macaw.Auth.Native.Seal` under `sealing_key` (associated data `"macaw_auth enrollment_ticket"`), ten minutes long, a constant (`Macaw.Auth.Native.Ticket`). The enrollment page shows `Macaw.Auth.Plug.enrollment/1` and submits to `Macaw.Auth.Plug.enroll_second_factor/2`, which confirms the code behind the throttle (the account's `{:second_factor, id}` key and the address) and only then starts the session, its second factor passed, answering `{:ok, recovery_codes, conn}` unredirected for the page to show them. A ticket expired, tampered, of another purpose, spent (its account enrolled since), or whose account is gone, disabled or no longer required to enroll is `{:error, :invalid_ticket}`. The session-first path is removed, with no mode to keep it (#5, dco-tek/macaw/macaw#101):
   - `Macaw.Auth.create_session/2` of a `:required` user is `{:error, :enrollment_required}`, whatever the options, without asking the backend.
