@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.MacawAuth.Gen.Migration do
-  @shortdoc "Writes the migrations for the native backend's tables (users, sessions, second factor, throttle)"
+  @shortdoc "Writes the migrations for the native backend's tables (users, sessions, second factor, throttle, external ids)"
 
   @moduledoc """
   Writes the migrations that create the native backend's tables into the
@@ -13,7 +13,10 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
     `macaw_auth_users` and the `macaw_auth_recovery_codes` table
     (`Macaw.Auth.Native.Totp`, `Macaw.Auth.Native.RecoveryCodeRecord`);
   - `create_macaw_auth_throttle`: `macaw_auth_throttle`
-    (`Macaw.Auth.Native.ThrottleRecord`), the sign-in throttle's counts.
+    (`Macaw.Auth.Native.ThrottleRecord`), the sign-in throttle's counts;
+  - `add_macaw_auth_external_id`: the `external_id` column on
+    `macaw_auth_users` (`Macaw.Auth.Native.ExternalId`), each id an
+    earlier release kept in `extra` moved into it in the one spelling.
 
       mix macaw_auth.gen.migration
       mix macaw_auth.gen.migration --repo MyApp.Repo --migrations-path priv/repo/migrations
@@ -24,12 +27,14 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
 
   Each has its own file, and the task writes only those not yet there: a
   host that has the users and sessions migrations gets the second
-  factor's and the throttle's added after them, and a host that has all
-  four is refused, so
-  no table or column is ever created twice. Files are timestamped like `mix ecto.gen.migration`'s,
+  factor's, the throttle's and the external id's added after them, and a
+  host that has all five is refused, so no table or column is ever
+  created twice. Files are timestamped like `mix ecto.gen.migration`'s,
   one second apart, so they run in order.
 
-  The migrations are plain DDL the host owns and can read, and they are
+  The migrations are plain DDL the host owns and can read (the external
+  id's also rewrites the rows it moves, in its own code, calling nothing
+  in this library), and they are
   the ones this library's own tests run against SQLite, so what ships is
   what is tested. They work on Postgres and SQLite alike: the array
   columns are `{:array, :string}`, a native array on Postgres and JSON
@@ -43,7 +48,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
     {"create_macaw_auth_users", :users},
     {"create_macaw_auth_sessions", :sessions},
     {"add_macaw_auth_second_factor", :second_factor},
-    {"create_macaw_auth_throttle", :throttle}
+    {"create_macaw_auth_throttle", :throttle},
+    {"add_macaw_auth_external_id", :external_id}
   ]
 
   @impl true
@@ -260,6 +266,95 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
         create unique_index(:macaw_auth_throttle, [:kind, :subject])
         # The sweep deletes by age.
         create index(:macaw_auth_throttle, [:last_failure_ms])
+      end
+    end
+    """
+  end
+
+  def migration(:external_id, repo) do
+    """
+    defmodule #{repo}.Migrations.AddMacawAuthExternalId do
+      # Written by `mix macaw_auth.gen.migration`: a directory user's
+      # external id gets its own column on macaw_auth_users, spelled one way
+      # for every value: lower-case hex of the bytes the directory gave
+      # (Macaw.Auth.Native.ExternalId reads it back to those bytes). Earlier
+      # releases kept it in extra["external_id"], as the value itself when
+      # it printed and as hex otherwise, so one spelling could be either.
+      # This moves each one into the column and drops the key from extra.
+      #
+      # An old value becomes the directory's bytes when its spelling says
+      # which it was:
+      # - not lower-case hex (a UUID's dashes, a DN's "="): the value itself;
+      # - lower-case hex of bytes that print: those bytes would have been
+      #   kept as themselves, so this too is the value itself;
+      # - lower-case hex of bytes that don't print: either could have written
+      #   it ("12345678" as text, or the four bytes 12 34 56 78), so the
+      #   column is left empty. A directory user's row is found by username
+      #   and its id rewritten at every sign-in, so their next sign-in fills
+      #   it from the directory.
+      use Ecto.Migration
+
+      import Ecto.Query
+
+      def up do
+        alter table(:macaw_auth_users) do
+          # Lower-case hex of the directory's id; nil for a local user.
+          add :external_id, :string
+        end
+
+        flush()
+
+        for {id, extra, _} <- users(), Map.has_key?(extra, "external_id") do
+          {old, extra} = Map.pop(extra, "external_id")
+          set(id, extra, spelling(old))
+        end
+      end
+
+      # Back to the old spellings, which each column value has exactly one of.
+      def down do
+        for {id, extra, external_id} <- users(), external_id != nil do
+          set(id, Map.put(extra, "external_id", old_spelling(external_id)), nil)
+        end
+
+        alter table(:macaw_auth_users) do
+          remove :external_id
+        end
+      end
+
+      defp users do
+        repo().all(
+          from(u in "macaw_auth_users",
+            select: {type(u.id, :binary_id), type(u.extra, :map), u.external_id}
+          )
+        )
+      end
+
+      defp set(id, extra, external_id) do
+        repo().update_all(
+          from(u in "macaw_auth_users",
+            where: u.id == type(^id, :binary_id),
+            update: [set: [extra: type(^extra, :map), external_id: ^external_id]]
+          ),
+          []
+        )
+      end
+
+      # The column's spelling of an old value, or nil when it can't be told.
+      defp spelling(old) when is_binary(old) do
+        case Base.decode16(old, case: :lower) do
+          {:ok, bytes} ->
+            if String.printable?(bytes), do: Base.encode16(old, case: :lower), else: nil
+
+          :error ->
+            Base.encode16(old, case: :lower)
+        end
+      end
+
+      defp spelling(_not_a_string), do: nil
+
+      defp old_spelling(spelling) do
+        bytes = Base.decode16!(spelling, case: :lower)
+        if String.printable?(bytes), do: bytes, else: spelling
       end
     end
     """

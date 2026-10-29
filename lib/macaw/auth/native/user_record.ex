@@ -16,8 +16,12 @@ defmodule Macaw.Auth.Native.UserRecord do
     an array field itself. One migration serves both; no query needs to
     look inside the list.
   - `disabled_at` set means refused, whatever the password.
-  - `extra` holds what a source knows beyond these (an LDAP DN, its id
-    attribute, email) and the host's own fields.
+  - `external_id` is a directory user's id, the binary the directory
+    gave, stored in one spelling (`Macaw.Auth.Native.ExternalId`, added
+    by its own migration); nil for a local user. Only
+    `Macaw.Auth.Native.Provision` writes it: `changeset/2` never casts it.
+  - `extra` holds what a source knows beyond these (an LDAP DN, email)
+    and the host's own fields.
 
   - `totp_secret_sealed`, `totp_enabled_at`, `totp_last_step`: the second
     factor (`Macaw.Auth.Native.Totp`), added by their own migration. The
@@ -44,6 +48,7 @@ defmodule Macaw.Auth.Native.UserRecord do
     field(:disabled_at, :utc_datetime_usec)
     field(:must_change_password, :boolean, default: false)
     field(:extra, :map, default: %{})
+    field(:external_id, Macaw.Auth.Native.ExternalId)
     field(:totp_secret_sealed, :binary, redact: true)
     field(:totp_enabled_at, :utc_datetime_usec)
     field(:totp_last_step, :integer)

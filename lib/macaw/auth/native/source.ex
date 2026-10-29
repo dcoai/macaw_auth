@@ -19,7 +19,8 @@ defmodule Macaw.Auth.Native.Source do
 
   **Who owns the row.** A source that keeps the user's row returns it as
   `:record` (`Password`). Any other returns what it knows about the user
-  (`:username`, `:display_name`, `:roles`, `:extra`) and the chain
+  (`:username`, `:display_name`, `:roles`, `:extra`, and a directory's
+  `:external_id`, the binary it identifies the entry by) and the chain
   provisions the row just in time (`Macaw.Auth.Native.Provision`).
   """
 
@@ -34,10 +35,11 @@ defmodule Macaw.Auth.Native.Source do
   @type attrs ::
           %{record: UserRecord.t()}
           | %{
-              username: String.t(),
-              display_name: String.t() | nil,
-              roles: [String.t()],
-              extra: map()
+              required(:username) => String.t(),
+              required(:display_name) => String.t() | nil,
+              required(:roles) => [String.t()],
+              required(:extra) => map(),
+              optional(:external_id) => binary()
             }
 
   @doc """

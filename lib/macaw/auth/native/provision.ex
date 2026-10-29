@@ -4,7 +4,9 @@ defmodule Macaw.Auth.Native.Provision do
   `External.resolve/2`): a directory user signing in for the first time
   gets a `macaw_auth_users` row, with `source` the directory's name and no
   password, and at every later sign-in the directory's word replaces the
-  row's roles and display name. The directory is the authority on who is
+  row's roles, display name and external id (the binary the directory
+  identifies the entry by, `Macaw.Auth.Native.ExternalId` spelling it in
+  the column). The directory is the authority on who is
   in which group, so a user removed from an admin group loses the role at
   their next sign-in, not whenever someone remembers to edit the row.
 
@@ -49,6 +51,7 @@ defmodule Macaw.Auth.Native.Provision do
       roles: attrs.roles,
       extra: Map.get(attrs, :extra, %{})
     })
+    |> Ecto.Changeset.put_change(:external_id, attrs[:external_id])
     |> repo.insert()
     |> case do
       {:ok, record} ->
@@ -85,6 +88,7 @@ defmodule Macaw.Auth.Native.Provision do
        roles: attrs.roles,
        extra: Map.merge(record.extra || %{}, Map.get(attrs, :extra, %{}))
      })
+     |> Ecto.Changeset.put_change(:external_id, attrs[:external_id])
      |> repo.update!()}
   end
 end

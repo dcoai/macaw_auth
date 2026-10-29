@@ -79,7 +79,8 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
     assert %{username: "alice", roles: ["admin"], display_name: "Alice Admin"} = alice
     assert alice.extra["email"] == "alice@example.test"
     assert alice.extra["dn"] == "uid=alice,cn=users,#{@base}"
-    assert alice.extra["external_id"] =~ ~r/^[0-9a-f-]{36}$/
+    assert alice.external_id =~ ~r/^[0-9a-f-]{36}$/
+    refute Map.has_key?(alice.extra, "external_id")
 
     assert {:ok, %{roles: ["viewer"]}} = auth(nas(), "bob", "bob-password")
     assert {:error, :not_in_group} = auth(nas(), "carol", "carol-password")
@@ -397,7 +398,7 @@ defmodule Macaw.Auth.Native.Source.LdapTest do
              ]
 
       # Without the id attribute on the entry, the external id is the DN.
-      assert {:ok, %{extra: %{"external_id" => "uid=alice,cn=users," <> _}}} =
+      assert {:ok, %{external_id: "uid=alice,cn=users," <> _}} =
                auth(nas(%{id_attr: "employeeNumber"}), "alice", "alice-password")
 
       # A non-ASCII password goes as its UTF-8 bytes: refused as any wrong one.

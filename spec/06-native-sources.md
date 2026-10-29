@@ -6,7 +6,7 @@ Where `Macaw.Auth.Native` checks a password: `Macaw.Auth.Native.Source`, a behav
 
 A source implements:
 - **`parse(config, context)`:** its struct from its configuration (a map with atom or string keys), `{:ok, source}`, or `{:error, "sources[<name>].<key>: …"}` naming what is wrong. `context` carries `:repo`, `:hasher` and `:env` (the environment for `{:env, VAR}` secrets);
-- **`authenticate(source, username, password, opts)`:** `{:ok, attrs}` for a user it accepted, or `{:error, reason}`. `attrs` is either **`%{record: row}`**, for a source that keeps the user's row (`Password`), or **what it knows about the user**, `%{username, display_name, roles, extra}`, from which the chain provisions the row (§4);
+- **`authenticate(source, username, password, opts)`:** `{:ok, attrs}` for a user it accepted, or `{:error, reason}`. `attrs` is either **`%{record: row}`**, for a source that keeps the user's row (`Password`), or **what it knows about the user**, `%{username, display_name, roles, extra}` and, from a directory, `external_id` (the binary it identifies the entry by, §6), from which the chain provisions the row (§4);
 - **`knows?(source, reason)`:** whether a refusal with `reason` means the source knows the user, and so decides (§2);
 - **`explain(reason)`:** a sentence explaining a reason, for logs and diagnostics.
 
@@ -78,8 +78,8 @@ a row with source "nas" and no hash refuses "" and "anything" with :invalid_cred
 ## 4. Provisioning directory users {#auth-provision}
 
 `Macaw.Auth.Native.Provision` is where the chain makes them: `Macaw.Auth.Native.Provision.directory_user/3` (`repo`, the source's name, its `attrs`) gives the row for a user a directory accepted (ported from exio's `External.resolve/2`):
-- **first sign-in:** a new row with the directory's normalized username, `source` the directory's name, **no password**, and its display name, roles and `extra`;
-- **every later sign-in: the directory's word replaces** the row's roles and display name, and its `extra` is merged over the row's. The directory is the authority on who is in which group, so a user removed from an admin group loses the role at their next sign-in, not whenever someone remembers to edit the row;
+- **first sign-in:** a new row with the directory's normalized username, `source` the directory's name, **no password**, and its display name, roles, external id (§6) and `extra`;
+- **every later sign-in: the directory's word replaces** the row's roles, display name and external id, and its `extra` is merged over the row's. The directory is the authority on who is in which group, so a user removed from an admin group loses the role at their next sign-in, not whenever someone remembers to edit the row;
 - **a row with that username that another source owns** (a local user, or another directory's) **is never taken over:** `{:error, :username_taken}`. A directory that happens to have an `owner` entry doesn't become the local `owner`;
 - **a disabled row stays refused,** `{:error, :disabled}`, whatever the directory says, and is left as it is;
 - **a directory username that isn't a valid one** is `{:error, :invalid_username}`, and no row is made;
@@ -113,11 +113,33 @@ a directory username "Bad User" is refused :invalid_credentials and no row is ma
 
 `Macaw.Auth.Native.UserRecord` is a row of `macaw_auth_users` ([12](12-native-migrations.md)):
 - **`username` is stored normalized** and unique. `Macaw.Auth.Native.UserRecord.normalize_username/1` trims and lower-cases, then requires **1–64 characters of `a-z 0-9 . _ @ + -`, starting with a letter or digit:** `{:ok, name}` or `{:error, :invalid_username}`. Nothing else is rewritten, so two distinct inputs never become one user, and `Alice` and `alice ` are one user on every database without a case-insensitive collation;
-- `hashed_password` is nil for a directory user; `source` names the owning source (`"local"` by default); `roles` a list of strings (`[]`); `disabled_at` set means refused; `must_change_password` (false); `extra` (`%{}`) holds what a source knows beyond these (an LDAP DN, its id attribute, email) and the host's own fields;
+- `hashed_password` is nil for a directory user; `source` names the owning source (`"local"` by default); `roles` a list of strings (`[]`); `disabled_at` set means refused; `must_change_password` (false); `external_id` a directory user's id (§6), nil for a local user; `extra` (`%{}`) holds what a source knows beyond these (an LDAP DN, email) and the host's own fields;
 - `totp_secret_sealed`, `totp_enabled_at` and `totp_last_step` are the second factor's ([11](11-native-totp.md)): only `Macaw.Auth.Native.Totp` writes them, each by a conditional update, and `changeset/2` never casts them;
 - `hashed_password` and `totp_secret_sealed` are redacted from inspection;
-- `Macaw.Auth.Native.UserRecord.changeset/2` casts the rest, requires `username` and `source`, normalizes the username (an invalid one is the error `"must be 1–64 of a-z 0-9 . _ @ + -"`) and checks it unique.
+- `Macaw.Auth.Native.UserRecord.changeset/2` casts the rest but `external_id`, which only `Macaw.Auth.Native.Provision` writes, requires `username` and `source`, normalizes the username (an invalid one is the error `"must be 1–64 of a-z 0-9 . _ @ + -"`) and checks it unique.
 
 ```test:username-normalize
 normalize_username(" Alice ") is {:ok, "alice"}; "not a name!", "", a 65-character name, "-x" and nil are {:error, :invalid_username}
+```
+
+## 6. The external id {#auth-external-id}
+
+A directory identifies an entry by an id of its own (an LDAP source's `id_attr`, [07 §3](07-native-ldap.md#auth-ldap-flow)): **the id is the binary the directory gave,** whatever its bytes. An `entryUUID` is text, an `objectGUID` sixteen bytes that mostly don't print. The source hands it over as it is (`attrs.external_id`), and the row holds it as `external_id`; a local user has none (nil).
+
+**The column holds one spelling of it for every value: lower-case hex of its bytes** (`Macaw.Auth.Native.ExternalId`, an Ecto type, `:string` in the database). Encoding at this edge, never in the source, is what keeps it one id:
+- **no value has two spellings,** and **no two values share one:** hex is a bijection on byte strings. (Earlier releases kept the value itself when it printed and hex otherwise, so the text `"00ff"` and the bytes `<<0, 255>>` were both spelled `00ff`, and one id's spelling turned on a test of its bytes);
+- **read back, it is the directory's binary,** exactly (`Macaw.Auth.Native.ExternalId.decode/1`);
+- it is text every database stores, compares and indexes alike, with **no case or padding variants** (upper-case hex or Base64 would have them), so a query by it (`get_by(UserRecord, external_id: binary)`, the type spelling the binary) matches on every database;
+- **a column value that isn't lower-case hex fails the load** (`ArgumentError`): a row written by anything else is a bug surfaced, not a value guessed at.
+
+```test:external-id-spelling
+through the chain from the fake directory: an entryUUID, a 16-byte objectGUID and the printable "00ff" are stored as lower-case hex of their bytes ("30306666" for "00ff"), each read back as the directory gave it, and found by get_by external_id; without the attribute the source hands over the DN; the next sign-in writes the directory's new id over the row's; a local user's column is nil
+```
+
+```test:external-id-load
+load of "ABCD", "abc", "zz" or a UUID is :error, "" is {:ok, ""}; cast of an atom and dump of an integer are :error; a row whose column says "NOT HEX" raises ArgumentError when read
+```
+
+```test:external-id-one-spelling
+property, 50 runs over pairs of binaries: the spelling is lower-case hex, the dump, decode and load give back the binary, and two distinct binaries never share a spelling; "00ff", <<0, 255>>, "abcd", <<0xAB, 0xCD>>, "", " ", "é" and <<233>> have eight spellings
 ```

@@ -126,14 +126,13 @@ LDAPS with the test CA signs bob in; LDAPS by IP address (the certificate names 
 
 The connection is closed after, whatever the outcome. **Every value sent to `:eldap`** (DN, password, filter value) **goes as its UTF-8 bytes,** so a non-ASCII password binds as the directory stored it (the old charlist conversion broke them).
 
-An accepted user is `{:ok, attrs}` for the chain to provision ([06 §4](06-native-sources.md#auth-provision)): `username`, `display_name` (the first `display_name_attr` value), `roles`, and `extra`:
+An accepted user is `{:ok, attrs}` for the chain to provision ([06 §4](06-native-sources.md#auth-provision)): `username`, `display_name` (the first `display_name_attr` value), `roles`, `external_id`, and `extra`. **`external_id` is the first `id_attr` value as the directory gave it,** printable or not, and the DN when the entry has none: the source never spells it, the users row's column does, one way for every value ([06 §6](06-native-sources.md#auth-external-id)). `extra` holds:
 - `"dn"`: the user's DN;
-- `"external_id"`: the first `id_attr` value, as it is when printable, else as lower-case hex; the DN when the entry has none;
 - `"email"`: the first `email_attr` value;
 - `"groups"`: the DNs of the user's groups.
 
 ```test:ldap-direct-bind
-on the fixture directory over StartTLS: alice signs in with roles ["admin"], display name "Alice Admin", email, DN and a 36-character external id; bob with ["viewer"]; carol is :not_in_group; a wrong password and an unknown user are :invalid_credentials; "" is :empty_password; "Bad User" is :invalid_username; without default_role, bob is :no_role
+on the fixture directory over StartTLS: alice signs in with roles ["admin"], display name "Alice Admin", email, DN and a 36-character external id (not in extra); bob with ["viewer"]; carol is :not_in_group; a wrong password and an unknown user are :invalid_credentials; "" is :empty_password; "Bad User" is :invalid_username; without default_role, bob is :no_role
 ```
 
 ```test:ldap-search

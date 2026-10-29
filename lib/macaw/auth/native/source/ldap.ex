@@ -130,9 +130,9 @@ defmodule Macaw.Auth.Native.Source.Ldap do
          username: name,
          display_name: first(entry, source.display_name_attr),
          roles: roles,
+         external_id: external_id(source, entry, dn),
          extra: %{
            "dn" => dn,
-           "external_id" => external_id(source, entry, dn),
            "email" => first(entry, source.email_attr),
            "groups" => Enum.map(groups, & &1.dn)
          }
@@ -396,13 +396,12 @@ defmodule Macaw.Auth.Native.Source.Ldap do
     end)
   end
 
+  # The directory's binary as it gave it, printable or not: the column
+  # spells it (Macaw.Auth.Native.ExternalId), never the source.
   defp external_id(source, entry, dn) do
     case Map.get(entry, String.downcase(source.id_attr)) do
-      [value | _] ->
-        if String.printable?(value), do: value, else: Base.encode16(value, case: :lower)
-
-      _ ->
-        dn
+      [value | _] -> value
+      _ -> dn
     end
   end
 
