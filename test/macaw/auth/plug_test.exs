@@ -51,6 +51,11 @@ defmodule Macaw.Auth.PlugTest do
 
   defp location(conn), do: conn |> get_resp_header("location") |> List.first()
 
+  defp with_public_url(url) do
+    on_exit(fn -> Application.delete_env(:macaw_auth, :public_url) end)
+    Application.put_env(:macaw_auth, :public_url, url)
+  end
+
   @tag verifies: "plug-require-signed-out"
   test "a signed-out visitor is sent to sign in, remembering where a GET was going" do
     conn = request("/reports?year=2026") |> AuthPlug.require_authenticated([])
@@ -302,7 +307,63 @@ defmodule Macaw.Auth.PlugTest do
 
       plain = request("/login") |> AuthPlug.log_in(user, remember: true)
       assert plain.scheme == :http
+      assert Application.get_env(:macaw_auth, :public_url) == nil
       assert plain.resp_cookies[@remember].secure == false
+    end
+
+    @tag verifies: "plug-remember-secure-declared"
+    test "a declared https public URL adds secure to a plain request; nothing removes it" do
+      {user, _} = Mem.user!(%{})
+      with_public_url("https://app.example.com")
+
+      # Plain http, as a TLS-terminating proxy forwards it.
+      remembered = request("/login") |> AuthPlug.log_in(user, remember: true)
+      assert remembered.scheme == :http
+      assert remembered.resp_cookies[@remember].secure == true
+
+      # Deleting it carries the same flag.
+      forgotten =
+        conn(:get, "/login")
+        |> with_secret()
+        |> recycle_cookies(remembered)
+        |> init_test_session(%{})
+        |> fetch()
+        |> AuthPlug.log_in(user)
+
+      assert forgotten.resp_cookies[@remember].max_age == 0
+      assert forgotten.resp_cookies[@remember].secure == true
+
+      # An http public URL adds nothing, and takes nothing from https.
+      with_public_url("http://app.example.com")
+      plain = request("/login") |> AuthPlug.log_in(user, remember: true)
+      assert plain.resp_cookies[@remember].secure == false
+
+      https =
+        %{conn(:get, "/login") | scheme: :https}
+        |> with_secret()
+        |> init_test_session(%{})
+        |> fetch()
+        |> AuthPlug.log_in(user, remember: true)
+
+      assert https.resp_cookies[@remember].secure == true
+    end
+
+    @tag verifies: "plug-public-url-checked"
+    test "the public URL is an http or https URL with a host, else ArgumentError naming it" do
+      assert AuthPlug.public_scheme() == nil
+      with_public_url("https://app.example.com")
+      assert AuthPlug.public_scheme() == :https
+      with_public_url("http://app.example.com")
+      assert AuthPlug.public_scheme() == :http
+
+      for bad <- ["ftp://app.example.com", "https://", "app.example.com", :https] do
+        with_public_url(bad)
+
+        assert_raise ArgumentError,
+                     "config :macaw_auth, public_url: must be an http or https URL with a host, " <>
+                       "got #{inspect(bad)}",
+                     &AuthPlug.public_scheme/0
+      end
     end
 
     @tag verifies: "plug-remember-off"
@@ -1065,10 +1126,18 @@ defmodule Macaw.Auth.PlugTest do
     end
 
     @tag verifies: "auth-plug-secure"
-    test "the library sets no cookie but its own, secure by the request's scheme alone" do
+    test "the library sets no cookie but its own, secure by the scheme or the declared public URL" do
       {user, _} = Mem.user!(%{})
 
-      for {scheme, secure} <- [https: true, http: false] do
+      for {url, scheme, secure} <- [
+            {nil, :https, true},
+            {nil, :http, false},
+            {"https://app.example.com", :http, true},
+            {"http://app.example.com", :http, false},
+            {"http://app.example.com", :https, true}
+          ] do
+        if url, do: with_public_url(url), else: Application.delete_env(:macaw_auth, :public_url)
+
         conn =
           %{conn(:get, "/login") | scheme: scheme}
           |> with_secret()

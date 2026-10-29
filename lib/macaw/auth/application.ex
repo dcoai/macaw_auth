@@ -4,6 +4,10 @@ defmodule Macaw.Auth.Application do
 
   @impl true
   def start(_type, _args) do
+    # The host's public URL, when declared, is read first, so a value that
+    # is not an http or https URL refuses to start, named.
+    _scheme = Macaw.Auth.Plug.public_scheme()
+
     # The configured backend's configuration is checked at boot, so a fault
     # in it refuses to start, named, rather than failing a sign-in. With no
     # backend configured, none is asked (Macaw.Auth.backend/0 then raises at

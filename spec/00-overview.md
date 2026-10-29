@@ -40,7 +40,7 @@ The test suite carries a third, `Macaw.Auth.Test.MemoryBackend` (`test/support`)
 - **Dev and test only:** `extla` (`~> 0.6.0`, from Hex), the model checker for the throttle's model ([10 §7](10-native-throttle.md#auth-throttle-model)), and `surfex` (`~> 0.10.0`), which keeps spec, tests and code aligned. Dev and test dependencies are not transitive, so neither reaches a host.
 - **Elixir** 1.18 or newer.
 
-**The application** (`Macaw.Auth.Application`) starts two processes: `Macaw.Auth.Registry`, a `Registry` with duplicate keys, the local revocation channel ([01 §6](01-contract.md#auth-revocation)); and `Macaw.Auth.Native.Throttle`, the throttle's table, started whichever backend is configured ([10 §6](10-native-throttle.md#auth-throttle-table)). Before either, it calls the configured backend's `check_config!/0`, whichever backend `:backend` names, so a fault in that backend's configuration refuses boot, named ([01 §2.9](01-contract.md#auth-backend-check-config)); with `:backend` unset, it asks no backend and starts.
+**The application** (`Macaw.Auth.Application`) starts two processes: `Macaw.Auth.Registry`, a `Registry` with duplicate keys, the local revocation channel ([01 §6](01-contract.md#auth-revocation)); and `Macaw.Auth.Native.Throttle`, the throttle's table, started whichever backend is configured ([10 §6](10-native-throttle.md#auth-throttle-table)). Before either, it reads the host's public URL, when one is declared (`config :macaw_auth, public_url:`), so one that is not an http or https URL refuses boot, named ([02 §10.3](02-plugs.md#auth-plug-secure)); then it calls the configured backend's `check_config!/0`, whichever backend `:backend` names, so a fault in that backend's configuration refuses boot, named ([01 §2.9](01-contract.md#auth-backend-check-config)); with `:backend` unset, it asks no backend and starts.
 
 ```test:application-children
 the application starts Macaw.Auth.Registry and Macaw.Auth.Native.Throttle; Macaw.Auth.subscribe/1 then succeeds without a :pubsub, and Throttle.check/3 answers
@@ -67,7 +67,7 @@ Every setting that grants trust or loosens a policy defaults to granting nothing
 - **the release entry points have no default prefix:** without `env_prefix` they refuse ([13 §5](13-native-users.md#auth-users-release));
 - **a role check passes only on membership,** and what a role allows is the app's ([02 §4](02-plugs.md#auth-plug-require-role));
 - **with no authorizer configured, nothing is authorized:** `Macaw.Auth.authorize/3` is false, and the plug and the hook refuse ([01 §9](01-contract.md#auth-authorize));
-- **the remember cookie is `secure` under https,** with no setting to turn it off, and is set only when a sign-in asks for it ([02 §10](02-plugs.md#auth-plug-remember)).
+- **the remember cookie is `secure` under https,** with no setting to turn it off; a declared https public URL can only add `secure` to a plain request, never remove it; and the cookie is set only when a sign-in asks for it ([02 §10](02-plugs.md#auth-plug-remember)).
 
 ## 6. Known gaps {#auth-gaps}
 

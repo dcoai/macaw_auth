@@ -36,12 +36,14 @@ defmodule Macaw.Auth.Plug do
   `fetch_current_user/2` reads when the session has none, after the
   browser closed. It lives for the backend's idle limit, set again each
   time the backend records the session's use, is `http_only`
-  and `same_site: "Lax"`, and is `secure` exactly when the request is
-  https; no setting turns that off. It dies with its session: a revoked
-  or expired session's token no longer resolves, and `log_out/1` deletes
-  it. Behind a TLS-terminating proxy, make the request's scheme the
-  client's (`Plug.RewriteOn` with `:x_forwarded_proto`), or the cookie goes
-  out without `secure`. The session cookie is the host's (its endpoint's
+  and `same_site: "Lax"`, and is `secure` when the request is https or
+  the host declares an https public URL (`config :macaw_auth, public_url:
+  "https://…"`, `public_scheme/0`); no setting turns that off. It dies
+  with its session: a revoked or expired session's token no longer
+  resolves, and `log_out/1` deletes it. Behind a TLS-terminating proxy,
+  declare the public URL, or make the request's scheme the client's
+  (`Plug.RewriteOn` with `:x_forwarded_proto`), or the cookie goes out
+  without `secure`. The session cookie is the host's (its endpoint's
   `Plug.Session` options); set `secure: true` there for an https site, as
   this cookie does by itself.
 
@@ -260,9 +262,9 @@ defmodule Macaw.Auth.Plug do
   `remember: true` also sets the remember cookie (`remember_cookie/0`):
   signed, holding the token, for the backend's idle limit
   (`Macaw.Auth.session_idle_seconds/1`), `http_only`, `same_site: "Lax"`,
-  and `secure` exactly when the request is https. Without it, a remember
-  cookie the browser sent is deleted. Other `opts` go to
-  `Macaw.Auth.create_session/2`.
+  and `secure` when the request is https or the declared public URL is
+  (`public_scheme/0`). Without it, a remember cookie the browser sent is
+  deleted. Other `opts` go to `Macaw.Auth.create_session/2`.
 
   When the backend refuses the session (`{:error, :invalid}`: the user no
   longer exists), the sign-in fails: back to the sign-in page, with an
@@ -324,7 +326,7 @@ defmodule Macaw.Auth.Plug do
       max_age: Auth.session_idle_seconds(),
       http_only: true,
       same_site: "Lax",
-      secure: conn.scheme == :https
+      secure: secure?(conn)
     )
   end
 
@@ -333,8 +335,43 @@ defmodule Macaw.Auth.Plug do
       sign: true,
       http_only: true,
       same_site: "Lax",
-      secure: conn.scheme == :https
+      secure: secure?(conn)
     )
+  end
+
+  # Secure can only be added: an https request always has it, and a
+  # declared https public URL adds it to a plain one (behind a proxy).
+  defp secure?(conn), do: conn.scheme == :https or public_scheme() == :https
+
+  @doc """
+  The scheme of the host's public URL, `config :macaw_auth, public_url:`
+  (`"https://app.example.com"`): `:https` or `:http`, nil when none is
+  declared. Anything but an http or https URL with a host raises
+  `ArgumentError` naming the setting; the application reads it at start,
+  so such a value refuses boot.
+  """
+  @spec public_scheme() :: :https | :http | nil
+  def public_scheme do
+    case Application.get_env(:macaw_auth, :public_url) do
+      nil -> nil
+      url -> scheme!(url)
+    end
+  end
+
+  defp scheme!(url) when is_binary(url) do
+    case URI.new(url) do
+      {:ok, %URI{scheme: "https", host: host}} when host not in [nil, ""] -> :https
+      {:ok, %URI{scheme: "http", host: host}} when host not in [nil, ""] -> :http
+      _ -> public_url_fault(url)
+    end
+  end
+
+  defp scheme!(url), do: public_url_fault(url)
+
+  defp public_url_fault(url) do
+    raise ArgumentError,
+          "config :macaw_auth, public_url: must be an http or https URL with a host, " <>
+            "got #{inspect(url)}"
   end
 
   @doc """

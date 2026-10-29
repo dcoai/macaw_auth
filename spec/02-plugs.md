@@ -254,7 +254,7 @@ A host's sign-in form may offer "remember me": **`log_in(conn, user, remember: t
 - **Its value is the session's token, signed** (`put_resp_cookie/4` with `sign: true`, under the endpoint's `secret_key_base`), never the bare token: a forged or altered cookie fails verification and is ignored as absent.
 - **`max_age` is the backend's idle limit,** `Macaw.Auth.session_idle_seconds/1` ([01 §2.8](01-contract.md#auth-backend-idle)): a cookie outliving its session would only carry a dead token.
 - **`http_only: true`** (no script reads it) and **`same_site: "Lax"`** (not sent on a cross-site sub-request or POST).
-- **`secure`** exactly when the request is https (§10.3).
+- **`secure`** when the request is https, or the host declares an https public URL (§10.3).
 
 ```test:plug-remember-cookie
 log_in(conn, user, remember: true) over http sets "_macaw_auth_remember" with max_age the backend's idle limit (3 600 for the memory backend), http_only true, same_site "Lax", secure false, and a value that Plug.Crypto.verify(secret_key_base, "_macaw_auth_remember_cookie", value) gives back as the session's token
@@ -301,12 +301,27 @@ after Macaw.Auth.revoke of the remembered session, the next request with an empt
 a cookie named "_macaw_auth_remember" holding a live token's Base64, unsigned, signs nobody in
 ```
 
-### 10.3 `secure` under https {#auth-plug-secure}
+### 10.3 `secure`: the request's scheme, or the declared public URL {#auth-plug-secure}
 
-The remember cookie is **`secure: true` exactly when `conn.scheme == :https`,** and no setting turns that off (defaults closed, [00 §5](00-overview.md#auth-closed)). Behind a TLS-terminating proxy, the host makes the request's scheme the client's (`Plug.RewriteOn` with `:x_forwarded_proto`, or the endpoint's `force_ssl`), so the scheme is https where the browser's is.
+The remember cookie is **`secure: true` when `conn.scheme == :https`, or when the host declares an https public URL;** otherwise `secure: false`. It is set and deleted with the same rule.
 
-**The session cookie is the host's,** set by its endpoint's `Plug.Session` options, not by this library. A host served over https sets `secure: true` there too, as phx.gen.auth's hosts do; the library's own cookie never depends on it.
+- **The public URL is the host's to state:** `config :macaw_auth, public_url: "https://app.example.com"`, the address its visitors reach it by, read at each request through `Macaw.Auth.Plug.public_scheme/0`, which gives `:https`, `:http`, or nil when none is declared. It states intent (where the site is served), not mechanism: there is no `secure:` switch. Only its scheme is used.
+- **It must be an http or https URL with a host:** anything else (another scheme, no host, not a string) raises `ArgumentError` naming the setting, `"config :macaw_auth, public_url: must be an http or https URL with a host, got …"`. `Macaw.Auth.Application` reads it at start, before it asks the backend ([00 §3](00-overview.md#auth-dependencies)), so such a value **refuses boot.**
+- **It can only add `secure`, never remove it** (defaults closed, [00 §5](00-overview.md#auth-closed)): an https request always gets `secure: true`, whatever is declared, and no setting turns it off. With nothing declared, the rule is the request's scheme alone, as before; an http public URL changes nothing.
+- **Behind a TLS-terminating proxy,** the request reaches the endpoint as plain http while the browser's is https. The host declares its https public URL, and the cookie is `secure` without the library trusting a forwarded header. Making the request's scheme the client's (`Plug.RewriteOn` with `:x_forwarded_proto`, or the endpoint's `force_ssl`) works too, and is the host's separate trust decision.
+
+**Its policy surface.** Who decides: the host, by stating where it is served. Wrong-closed, a host that declares https while it truly serves plain http end to end: the browser refuses a `secure` cookie from an http page, so remember-me fails where anyone tries it: after the browser restarts, the visitor is signed out. It fails closed and loudly enough to notice, never by leaking the cookie over plain http. Wrong-open is impossible: no value removes `secure` from an https request.
+
+**The session cookie is the host's,** set by its endpoint's `Plug.Session` options, not by this library, and this setting doesn't change it. A host served over https sets `secure: true` there too, as phx.gen.auth's hosts do; the library's own cookie never depends on it. The remember cookie is the only cookie the library sets.
 
 ```test:plug-remember-secure
-log_in(remember: true) of a request whose scheme is :https sets the cookie with secure true; over :http, secure false
+log_in(remember: true) of a request whose scheme is :https sets the cookie with secure true; over :http with no public_url, secure false
+```
+
+```test:plug-remember-secure-declared
+over :http with public_url "https://app.example.com" (a proxy terminating TLS), log_in(remember: true) sets the cookie with secure true, and deleting it (log_in without remember, from a browser that sent one) carries secure true too; with public_url "http://app.example.com", secure false; over :https with public_url "http://app.example.com", secure true
+```
+
+```test:plug-public-url-checked
+public_scheme/0 is :https for "https://app.example.com", :http for "http://app.example.com", nil with none; "ftp://app.example.com", "https://", "app.example.com" and :https each raise ArgumentError naming public_url; with public_url "ftp://app.example.com", :macaw_auth refuses to start, and with "https://app.example.com" it starts
 ```

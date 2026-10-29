@@ -145,6 +145,18 @@ defmodule Macaw.Auth.ApplicationTest do
     end
   end
 
+  describe "the host's public URL, read at start" do
+    @tag verifies: "plug-public-url-checked"
+    test "one that is not an http or https URL refuses boot, named; a sound one starts" do
+      assert {:error, {:macaw_auth, {:bad_return, {_, {:EXIT, {%ArgumentError{} = e, _}}}}}} =
+               boot_with(public_url: "ftp://app.example.com")
+
+      assert Exception.message(e) =~ "config :macaw_auth, public_url:"
+      assert {:ok, _} = boot_with(public_url: "https://app.example.com")
+      assert Application.get_env(:macaw_auth, :public_url) == nil
+    end
+  end
+
   # Stops :macaw_auth, starts it again with `env` (each key's value, nil to
   # delete it), and gives that start's answer. Before answering, it puts back
   # the environment and the native configuration kept in :persistent_term,

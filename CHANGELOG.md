@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The remember cookie is `secure` when the request is https or the host declares an https public URL, `config :macaw_auth, public_url: "https://…"` (`Macaw.Auth.Plug.public_scheme/0`), so a host behind a TLS-terminating proxy gets it without trusting a forwarded header. It only adds `secure`: an https request always has it, and nothing declared leaves today's rule. A public URL that is not an http or https URL refuses boot (#2, dco-tek/macaw/macaw#93).
 - `Macaw.Auth.Native.delete_user/2` deletes a user, their sessions revoked first (announced unless `announce: false`) and their sessions and recovery codes going with the row; `delete NAME` among `mix macaw_auth.user`'s commands and the release entry points (#1, dco-tek/macaw/macaw#93).
 
 ## v0.4.3 (2026-10-28)
