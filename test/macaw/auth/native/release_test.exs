@@ -104,15 +104,24 @@ defmodule Macaw.Auth.Native.ReleaseTest do
     # Each runs `elixir` with only the build's code paths and nothing the
     # test loaded, over its own SQLite database (migrated with the shipped
     # migrations), the arguments in RT_CTL_ARGS: `{stdout, stderr, status}`.
+    #
+    # The repo keeps a rollback journal and waits longer on a lock: the
+    # migrator opens two connections at once on the new file, and in WAL
+    # mode each sets the journal as it opens (before its busy_timeout
+    # applies), which can find the file locked: "database is locked", then
+    # a dropped schema_migrations request. A new file is already in
+    # rollback mode, so `:delete` takes no lock to set.
     setup %{tmp_dir: dir} do
       db = Path.join(dir, "release.db")
       migrations = Path.expand("../../../../tmp/test/migrations", __DIR__)
+
+      repo = [database: db, pool_size: 1, journal_mode: :delete, busy_timeout: 10_000]
 
       prelude = """
       Application.load(:macaw_auth)
       Application.put_env(:ecto_sqlite3, :json_library, JSON)
       Application.put_env(:bcrypt_elixir, :log_rounds, 4)
-      Application.put_env(:macaw_auth, Macaw.Auth.Test.Repo, database: #{inspect(db)}, pool_size: 1)
+      Application.put_env(:macaw_auth, Macaw.Auth.Test.Repo, #{inspect(repo)})
       Application.put_env(:macaw_auth, Macaw.Auth.Native, repo: Macaw.Auth.Test.Repo)
       """
 
