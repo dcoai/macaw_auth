@@ -30,7 +30,8 @@ defmodule Macaw.Auth.Conformance do
     one; the backend's `session_idle_seconds/1` is the fixture's
     `idle_seconds/0` (the remember cookie's lifetime); a disabled user's
     live session is refused;
-  - a user's sessions list newest first;
+  - a user's sessions list newest first (two started a minute apart, by
+    `:now`);
   - completing a step of a revoked session is `{:error, :invalid}`;
   - a user with a second factor owes it, and completing the step clears it;
     a user enrolled through the fixture is reported `:enrolled`; a valid
@@ -232,9 +233,11 @@ defmodule Macaw.Auth.Conformance do
 
         test "a user's sessions list newest first" do
           {user, _} = @fixtures.user!(%{})
-          {:ok, _, first} = Auth.create_session(user)
-          Process.sleep(5)
-          {:ok, _, second} = Auth.create_session(user)
+          # A minute apart by `:now`, not by waiting on the clock.
+          earlier = DateTime.utc_now()
+          later = DateTime.add(earlier, 60, :second)
+          {:ok, _, first} = Auth.create_session(user, now: earlier)
+          {:ok, _, second} = Auth.create_session(user, now: later)
           assert [%{id: a}, %{id: b}] = Auth.list_sessions(user.id)
           assert {a, b} == {second.id, first.id}
         end

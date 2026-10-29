@@ -62,6 +62,14 @@ spec-links:
   script:
     - elixir ci/spec_links.exs
 
+# No test waits on the clock (ci/no_sleep.exs): no `Process.sleep` or
+# `:timer.sleep` in test/ or the conformance kit; an injected clock instead.
+no-sleep:
+  image: $ELIXIR_IMAGE
+  stage: check
+  script:
+    - elixir ci/no_sleep.exs
+
 test:
   extends: .elixir
   stage: test

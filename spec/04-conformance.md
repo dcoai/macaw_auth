@@ -49,7 +49,7 @@ Twenty-five tests, in five groups.
 11. an idle session is valid five seconds before `idle_seconds/0` and `{:error, :expired}` five seconds after, **looked up with `touch: false`, which never extends it;**
 12. **the backend reports the idle limit it expires by:** `Macaw.Auth.session_idle_seconds/1` ([01 §2.8](01-contract.md#auth-backend-idle)) equals `idle_seconds/0`, so the remember cookie lives exactly as long as an unused session ([02 §10](02-plugs.md#auth-plug-remember));
 13. a disabled user's live session is refused, with `:disabled` or `:invalid`;
-14. a user's sessions list newest first.
+14. a user's sessions list newest first: two started a minute apart by `:now` ([01 §2.2](01-contract.md#auth-backend-create-session)), not by waiting on the clock, list the later first.
 
 **`conformance: steps`:**
 

@@ -42,7 +42,8 @@ defmodule Macaw.Auth.Backend do
   Starts a session for a user who passed `authenticate/2`; returns the
   token for the client, or `{:error, :invalid}` when the user no longer
   exists (deleted since signing in), never a session for them. Options:
-  `:remote_ip`, `:user_agent`, `:second_factor_passed`.
+  `:remote_ip`, `:user_agent`, `:second_factor_passed`, `:now` (the
+  session's creation time).
   """
   @callback create_session(User.t(), opts()) ::
               {:ok, binary(), Session.t()} | {:error, :invalid}
