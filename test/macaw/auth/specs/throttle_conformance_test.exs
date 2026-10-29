@@ -8,38 +8,60 @@ defmodule Macaw.Auth.Specs.ThrottleConformanceTest do
 
   The mapping: `attempt` is a `check/3` that must give `:ok`; `succeed` is `success/1`;
   `fail` is `failure/3` with the time the attempt was admitted at; `sweep` is `sweep/1`,
-  which must forget as many rows as the model's; `tick` moves the clock only. Model time
-  `t` is `@t0 + t` ms.
+  which must forget as many rows as the model's; `restart` stops the application's
+  throttle process and starts it again; `tick` moves the clock only. Model time `t` is
+  `@t0 + t` ms. The table is the test repo's, in the test's sandbox.
 
   The same replay, with a defect §7 names in the code's place, must diverge: the check
   is shown to find what it is for.
   """
-  use ExUnit.Case, async: false
+  use Macaw.Auth.DataCase, async: false
   use ExUnitProperties
+
+  import Ecto.Query, only: [from: 2]
 
   alias ExTLA.ModelChecker
   alias ExTLA.Spec.Compiled
-  alias Macaw.Auth.Native.Throttle
+  alias Macaw.Auth.Native.{Throttle, ThrottleRecord}
   alias Macaw.Auth.Specs.Throttle, as: Model
 
   # The code under check: the throttle, or a defect in its place.
   defmodule Shipped do
     def failure(user, address, now), do: Throttle.failure(user, address, now)
     def success(user, _address), do: Throttle.success(user)
+
+    # The application's throttle process, stopped and started again.
+    def restart do
+      :ok = Supervisor.terminate_child(Macaw.Auth.Supervisor, Throttle)
+      {:ok, _} = Supervisor.restart_child(Macaw.Auth.Supervisor, Throttle)
+      :ok
+    end
   end
 
-  # The throttle as it shipped before macaw_compose#67: the count, then the time.
+  # The throttle as it shipped before macaw_compose#67: the count, then the time, as two
+  # statements.
   defmodule TwoStep do
     def failure(user, address, now) do
       for key <- [{:user, user} | if(address, do: [{:ip, address}], else: [])] do
-        :ets.update_counter(Throttle, key, {2, 1}, {key, 0, now})
-        :ets.update_element(Throttle, key, {3, now})
+        {kind, subject} = ThrottleRecord.columns(key)
+        row = %{kind: kind, subject: subject, failures: 1, last_failure_ms: now}
+
+        Repo.insert_all(ThrottleRecord, [row],
+          on_conflict: [inc: [failures: 1]],
+          conflict_target: [:kind, :subject]
+        )
+
+        Repo.update_all(
+          from(r in ThrottleRecord, where: r.kind == ^kind and r.subject == ^subject),
+          set: [last_failure_ms: now]
+        )
       end
 
       :ok
     end
 
     def success(user, _address), do: Throttle.success(user)
+    def restart, do: Shipped.restart()
   end
 
   defmodule ForgetsAddress do
@@ -47,9 +69,23 @@ defmodule Macaw.Auth.Specs.ThrottleConformanceTest do
 
     def success(user, address) do
       Throttle.success(user)
-      :ets.delete(Throttle, {:ip, address})
+      {"address", subject} = ThrottleRecord.columns({:ip, address})
+
+      Repo.delete_all(
+        from(r in ThrottleRecord, where: r.kind == "address" and r.subject == ^subject)
+      )
+
       :ok
     end
+
+    def restart, do: Shipped.restart()
+  end
+
+  # The throttle as it was before macaw_auth#4: its table in memory, lost at a restart.
+  defmodule InMemory do
+    def failure(user, address, now), do: Throttle.failure(user, address, now)
+    def success(user, _address), do: Throttle.success(user)
+    def restart, do: Throttle.reset()
   end
 
   @t0 1_790_856_000_000
@@ -66,15 +102,12 @@ defmodule Macaw.Auth.Specs.ThrottleConformanceTest do
     max_failures: 40
   }
 
-  @weights %{fail: 8, attempt: 4, tick: 2, succeed: 1, sweep: 1}
+  @weights %{fail: 8, attempt: 4, tick: 2, succeed: 1, sweep: 1, restart: 1}
 
-  @users %{u1: "u1", u2: "u2"}
+  # The model's users are names no account has: the throttle counts an account's key
+  # and a name's alike (spec/10 §1).
+  @users %{u1: {:name, "u1"}, u2: {:name, "u2"}}
   @addresses %{a1: "192.0.2.1", a2: "192.0.2.2", none: nil}
-
-  setup do
-    Throttle.reset()
-    on_exit(&Throttle.reset/0)
-  end
 
   @tag verifies: "throttle-model-conformance"
   property "many keys: two usernames, two addresses and none" do
@@ -106,6 +139,12 @@ defmodule Macaw.Auth.Specs.ThrottleConformanceTest do
     @tag verifies: "throttle-model-conformance"
     test "a success that forgets the address too" do
       assert {:diverged, {:succeed, _}, _what} = first_divergence(ForgetsAddress)
+    end
+
+    @tag verifies: "throttle-model-conformance"
+    test "a table in memory, forgotten at a restart" do
+      empty = MapSet.new()
+      assert {:diverged, {:restart, _}, {:rows, ^empty, _model}} = first_divergence(InMemory)
     end
   end
 
@@ -226,6 +265,11 @@ defmodule Macaw.Auth.Specs.ThrottleConformanceTest do
     if forgot != expected, do: {:sweep_forgot, forgot, expected}
   end
 
+  defp apply_step({:restart, _}, _pre, _post, impl) do
+    impl.restart()
+    nil
+  end
+
   defp apply_step({:tick, _}, _pre, _post, _impl), do: nil
 
   defp check(u, a, now), do: Throttle.check(@users[u], @addresses[a], @t0 + now)
@@ -239,8 +283,7 @@ defmodule Macaw.Auth.Specs.ThrottleConformanceTest do
 
   # The real table, as the model's rows.
   defp table do
-    Throttle
-    |> :ets.tab2list()
+    Throttle.rows()
     |> MapSet.new(fn {key, n, last} -> {model_key(key), n, last - @t0} end)
   end
 

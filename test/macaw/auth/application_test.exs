@@ -26,7 +26,16 @@ defmodule Macaw.Auth.ApplicationTest do
 
     assert Application.get_env(:macaw_auth, :pubsub) == nil
     assert Macaw.Auth.subscribe("application-children-user") == :ok
-    assert Throttle.check("application-children-user", "192.0.2.1", Throttle.now()) == :ok
+
+    # The throttle's counts are the native backend's repo's rows.
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    kept = :persistent_term.get(Config, nil)
+    on_exit(fn -> keep(kept) end)
+    {:ok, config} = Config.parse(repo: Repo)
+    Config.put(config)
+
+    assert Throttle.check({:name, "application-children-user"}, "192.0.2.1", Throttle.now()) ==
+             :ok
   end
 
   @tag verifies: "auth-dependencies"

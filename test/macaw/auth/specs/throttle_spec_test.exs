@@ -82,5 +82,27 @@ defmodule Macaw.Auth.Specs.ThrottleTest do
       assert result.status == :violation
       assert ExTLA.Trace.format(result.violation) =~ "succeed(p:"
     end
+
+    # The table in memory, as it shipped before macaw_auth#4: a restart forgets the
+    # failures the rules still count, and a guesser has a fresh budget.
+    @tag verifies: "throttle-model-defects"
+    test "a table in memory: after a restart, a guesser is admitted early" do
+      result = run(%{persistent: false}, [:no_early_admit])
+
+      assert result.status == :violation
+      trace = ExTLA.Trace.format(result.violation)
+      assert trace =~ ~r/restart.*attempt\(.*\[VIOLATION\]/s
+      assert trace =~ ~r/early_admit\s+= true   ← changed/
+    end
+
+    @tag verifies: "throttle-model-defects"
+    test "a table in memory: after a restart, the failures before it are not counted" do
+      result = run(%{persistent: false}, [:failures_each_count])
+
+      assert result.status == :violation
+      trace = ExTLA.Trace.format(result.violation)
+      assert trace =~ "failures_each_count"
+      assert trace =~ ~r/restart.*\[VIOLATION\]/s
+    end
   end
 end

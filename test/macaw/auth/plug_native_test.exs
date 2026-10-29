@@ -58,13 +58,13 @@ defmodule Macaw.Auth.PlugNativeTest do
                ) == {:error, :invalid_credentials}
       end
 
-      assert Throttle.check("someone", "203.0.113.9", ms(0)) == {:delay, 1_000}
-      assert Throttle.check("someone", "198.51.100.77", ms(0)) == :ok
+      assert Throttle.check({:name, "someone"}, "203.0.113.9", ms(0)) == {:delay, 1_000}
+      assert Throttle.check({:name, "someone"}, "198.51.100.77", ms(0)) == :ok
 
       # An IPv6 conn's address, formatted.
       v6 = from({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1})
       for i <- 1..5, do: AuthPlug.authenticate(v6, %{username: "v#{i}", password: "x"}, now: @t0)
-      assert Throttle.check("someone", "2001:db8::1", ms(0)) == {:delay, 1_000}
+      assert Throttle.check({:name, "someone"}, "2001:db8::1", ms(0)) == {:delay, 1_000}
     end
 
     @tag verifies: "auth-plug-verify"

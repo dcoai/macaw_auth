@@ -20,9 +20,9 @@ defmodule Macaw.Auth.Application do
     children = [
       # The local revocation channel, used when no `:pubsub` is configured.
       {Registry, keys: :duplicate, name: Macaw.Auth.Registry},
-      # The native backend's sign-in failure counts: one small ETS table,
-      # started whichever backend is configured, so it is there the moment
-      # one is.
+      # The sweep of the native backend's sign-in failure counts (rows in its
+      # repo), started whichever backend is configured, so it runs the
+      # moment one is; with none, it sweeps nothing.
       Macaw.Auth.Native.Throttle
     ]
 

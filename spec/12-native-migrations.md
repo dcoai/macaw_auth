@@ -17,33 +17,36 @@ mix macaw_auth.gen.migration --repo MyApp.Repo --migrations-path priv/repo/migra
 without --repo, the files are named for the configured repo: "defmodule Macaw.Auth.Test.Repo.Migrations.CreateMacawAuthUsers do"
 ```
 
-## 2. The three files {#auth-migrations-files}
+## 2. The four files {#auth-migrations-files}
 
 One file each, in this order:
 1. **`create_macaw_auth_users`:** `macaw_auth_users` (`Macaw.Auth.Native.UserRecord`, [06 §5](06-native-sources.md#auth-user-record)): `id` binary id primary key; `username` (not null) under a **unique index**; `display_name`; `hashed_password` (nil for a directory user); `source` (not null); `roles` `{:array, :string}` (not null); `disabled_at`; `must_change_password` (not null, default false); `extra` a map (not null); `inserted_at` and `updated_at` in microseconds;
 2. **`create_macaw_auth_sessions`:** `macaw_auth_sessions` (`Macaw.Auth.Native.SessionRecord`, [09](09-native-sessions.md)): `id` binary id; `user_id` referencing the users **with `on_delete: :delete_all`** (not null) and indexed; `token_hash` binary (not null) under a **unique index**; `remote_ip`; `user_agent`; `second_factor_passed` (not null, default true); `completed_steps` `{:array, :string}` (not null); `last_used_at` (not null); timestamps;
-3. **`add_macaw_auth_second_factor`:** on `macaw_auth_users`, `totp_secret_sealed` (binary), `totp_enabled_at` and `totp_last_step` (bigint); and **`macaw_auth_recovery_codes`** (`Macaw.Auth.Native.RecoveryCodeRecord`, [11 §6](11-native-totp.md#auth-totp-recovery)): `id`; `user_id` referencing the users with `on_delete: :delete_all` (not null); `code_hash` binary (not null); `inserted_at` only; a **unique index on `(user_id, code_hash)`**.
+3. **`add_macaw_auth_second_factor`:** on `macaw_auth_users`, `totp_secret_sealed` (binary), `totp_enabled_at` and `totp_last_step` (bigint); and **`macaw_auth_recovery_codes`** (`Macaw.Auth.Native.RecoveryCodeRecord`, [11 §6](11-native-totp.md#auth-totp-recovery)): `id`; `user_id` referencing the users with `on_delete: :delete_all` (not null); `code_hash` binary (not null); `inserted_at` only; a **unique index on `(user_id, code_hash)`**;
+4. **`create_macaw_auth_throttle`:** `macaw_auth_throttle` (`Macaw.Auth.Native.ThrottleRecord`, [10 §6](10-native-throttle.md#auth-throttle-table)), no `id`: `kind` and `subject` (not null) under a **unique index on `(kind, subject)`**, which a check, a failure's upsert and a success each find their rows by; `failures` integer (not null); `last_failure_ms` bigint (not null, milliseconds of the system clock outgrow 32 bits) under a plain index, for the sweep. No foreign key: an address or a name has no user row.
+
+**A release that adds a table adds a file,** after the others; it never changes one a host has already run. So a host on an earlier release runs the task again and gets only the new files (§3): from 0.4, the throttle's alone. Any later file (macaw#188's, if it lands in the same release) comes after it.
 
 **They work on Postgres and SQLite alike:** the array columns are `{:array, :string}`, a native array on Postgres and JSON text on SQLite (which ecto_sqlite3 encodes and decodes for an array field itself); no query looks inside them.
 
 ```test:migrations-write
-the task writes three files named <14 digits>_create_macaw_auth_users.exs, _create_macaw_auth_sessions.exs and _add_macaw_auth_second_factor.exs, in that order by name, defining MyApp.Repo.Migrations.CreateMacawAuthUsers, …CreateMacawAuthSessions and …AddMacawAuthSecondFactor, and says "* creating <path>" for each
+the task writes four files named <14 digits>_create_macaw_auth_users.exs, _create_macaw_auth_sessions.exs, _add_macaw_auth_second_factor.exs and _create_macaw_auth_throttle.exs, in that order by name, defining MyApp.Repo.Migrations.CreateMacawAuthUsers, …CreateMacawAuthSessions, …AddMacawAuthSecondFactor and …CreateMacawAuthThrottle, and says "* creating <path>" for each
 ```
 
 ```test:migrations-tables
-the migrated test database has exactly the users, sessions and recovery-code columns listed, the unique indexes on username, token_hash and (user_id, code_hash), and both foreign keys to macaw_auth_users with ON DELETE CASCADE
+the migrated test database has exactly the users, sessions, recovery-code and throttle columns listed, the unique indexes on username, token_hash, (user_id, code_hash) and (kind, subject), the throttle's plain index on last_failure_ms, both foreign keys to macaw_auth_users with ON DELETE CASCADE, and none from the throttle
 ```
 
 ## 3. Only the missing ones {#auth-migrations-missing}
 
-A file counts as present when the directory holds any `*_<name>.exs`. **The task writes only the files not yet there:** a host that has the users and sessions migrations gets the second factor's added after them, and **a host that has all three is refused** (`"<dir> already has the macaw_auth migrations (create_macaw_auth_users, create_macaw_auth_sessions, add_macaw_auth_second_factor)"`), so no table or column is ever created twice.
+A file counts as present when the directory holds any `*_<name>.exs`. **The task writes only the files not yet there:** a host that has the users and sessions migrations gets the second factor's and the throttle's added after them, a host that has the first three gets the throttle's alone, and **a host that has all four is refused** (`"<dir> already has the macaw_auth migrations (create_macaw_auth_users, create_macaw_auth_sessions, add_macaw_auth_second_factor, create_macaw_auth_throttle)"`), so no table or column is ever created twice.
 
 ```test:migrations-refuse-again
-running the task a second time raises "already has the macaw_auth migrations" and the directory still holds three files
+running the task a second time raises "already has the macaw_auth migrations" and the directory still holds four files
 ```
 
 ```test:migrations-only-missing
-with only the users file present, the task writes the sessions and second-factor files and leaves the users file alone; with users and sessions present, it writes only the second factor's, named after the sessions file
+with only the users file present, the task writes the sessions, second-factor and throttle files and leaves the users file alone; with users and sessions present, it writes the second factor's, named after the sessions file, and the throttle's; with the first three, only the throttle's, after them
 ```
 
 ## 4. Ordering {#auth-migrations-order}

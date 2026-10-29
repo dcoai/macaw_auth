@@ -3,8 +3,10 @@ defmodule Macaw.Auth.Specs.Throttle do
   `Macaw.Auth.Native.Throttle` as a model (spec/10 §7): the table of failures, shared by
   every sign-in in flight, and what each call does to it.
 
-  **State.** `table` is the ETS table, row for row: a set of `{key, failures, last}`,
-  where a key is `{:user, u}` or `{:ip, a}` and `last` is the last-failure time. `now` is
+  **State.** `table` is the `macaw_auth_throttle` table, row for row: a set of
+  `{key, failures, last}`, where a key is `{:user, u}` (`u` an account, or a name no
+  account has: the throttle counts both alike) or `{:ip, a}` and `last` is the
+  last-failure time. `now` is
   the clock. `proc` is each sign-in in flight: `:idle`, or admitted at `ts` and verifying
   its password, or part-way through recording its failure. Two history variables record
   a broken rule once it has happened: `early_admit` and `address_lowered`. `truth` is a
@@ -16,10 +18,12 @@ defmodule Macaw.Auth.Specs.Throttle do
   since a refusal changes nothing. `succeed(p)`: `Throttle.success/1`. `fail(p)`:
   `Throttle.failure/3` with the time the sign-in was admitted at, which may be older than
   `now` and older than another sign-in's failure. `tick(d)`: time passes. `sweep`:
-  `Throttle.sweep/1` at `now`.
+  `Throttle.sweep/1` at `now`. `restart`: the node restarts (a crash, a deploy): every
+  sign-in in flight dies, and the table, in the database, stays.
 
-  **What is abstracted.** A failure updates its keys one after another; the model
-  updates them in one step. Every operation reads and writes one key alone (a sweep
+  **What is abstracted.** A failure upserts its keys in one statement, which the
+  database applies row by row; the model updates them in one step. Every operation
+  reads and writes one key alone (a sweep
   decides each key on its own row), so the order across keys changes nothing a key's
   own history shows. Within a key, the steps are kept as the code takes them. A check
   reads its keys in one step. A check and the failure that follows it are separate
@@ -43,6 +47,8 @@ defmodule Macaw.Auth.Specs.Throttle do
       an insert, as a naive table would do.
     * `success_resets_address` - `false`: a success forgets the username's count only.
       `true` forgets the address's too.
+    * `persistent` - the table survives a restart. `false` is the table in memory, as it
+      shipped before macaw_auth#4: a restart empties it.
   """
 
   use ExTLA.Spec
@@ -60,6 +66,7 @@ defmodule Macaw.Auth.Specs.Throttle do
   constant(:atomic_stamp, default: true)
   constant(:atomic_increment, default: true)
   constant(:success_resets_address, default: false)
+  constant(:persistent, default: true)
 
   variable(:now, type: 0..^horizon)
   variable(:table, type: set({{:user, ^users} | {:ip, ^origins}, :nat, 0..^horizon}))
@@ -158,6 +165,16 @@ defmodule Macaw.Auth.Specs.Throttle do
   action :tick, params: [d: ^ticks] do
     require now + d <= ^horizon
     now = now + d
+  end
+
+  # The node restarts: the sign-ins in flight die before they are counted, which is
+  # no reset (`truth` keeps every failure counted). The table stays, in the database;
+  # held in memory, it is lost. Not between a defect's two steps: the design has no
+  # such step, and the defects are found without it.
+  action :restart do
+    require Enum.all?(^procs, fn p -> phase(proc[p]) in [:idle, :verify] end)
+    proc = for_each(^procs, fn _ -> :idle end)
+    table = if ^persistent, do: table, else: set()
   end
 
   # `Throttle.sweep/1` at `now`: a key whose last failure is more than `idle` old.

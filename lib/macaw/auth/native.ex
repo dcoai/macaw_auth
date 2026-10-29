@@ -20,14 +20,16 @@ defmodule Macaw.Auth.Native do
     first sign-in and their roles re-derived at every one;
   - `Macaw.Auth.Native.Hasher`: bcrypt or argon2, rehashing at sign-in;
   - `Macaw.Auth.Native.Throttle`: backoff after repeated failures, per
-    username and per client address;
+    account and per client address, kept in the database;
   - `Macaw.Auth.Native.Sessions`: hashed session tokens, idle expiry,
     steps;
   - `Macaw.Auth.Native.Totp`: the second factor, TOTP and recovery codes,
     its secret sealed at rest (`Macaw.Auth.Native.Seal`);
-  - `Macaw.Auth.Native.UserRecord`, `Macaw.Auth.Native.SessionRecord` and
-    `Macaw.Auth.Native.RecoveryCodeRecord`: the `macaw_auth_users`,
-    `macaw_auth_sessions` and `macaw_auth_recovery_codes` schemas.
+  - `Macaw.Auth.Native.UserRecord`, `Macaw.Auth.Native.SessionRecord`,
+    `Macaw.Auth.Native.RecoveryCodeRecord` and
+    `Macaw.Auth.Native.ThrottleRecord`: the `macaw_auth_users`,
+    `macaw_auth_sessions`, `macaw_auth_recovery_codes` and
+    `macaw_auth_throttle` schemas.
 
   **One refusal.** Whatever a source's reason, the caller sees
   `:invalid_credentials`, or `:disabled` for a disabled user who gave
@@ -41,9 +43,9 @@ defmodule Macaw.Auth.Native do
   (`totp_required`) requires one, else `:none`; `Macaw.Auth.pending_step/2`
   turns that into the step a session owes. The enrollment and
   verification functions here put every code check behind the throttle:
-  a wrong code is a failure for the user's second-factor key and the
+  a wrong code is a failure for the account's second-factor key and the
   client's address, with the same backoff as a wrong password, so six
-  digits can't be guessed. The second factor's username key is its own
+  digits can't be guessed. The second factor's user key is its own
   (a password success doesn't reset it, or each sign-in would buy a
   guesser who has the password five more free guesses at the code); the
   address key is the one sign-in uses. Configure it with:
@@ -68,13 +70,14 @@ defmodule Macaw.Auth.Native do
   tuple; the client's, for the throttle's address key), `:now` (a
   `DateTime`, for the throttle's clock).
 
-  **Throttled.** While the username or the address waits
-  (`Macaw.Auth.Native.Throttle`), the password is not checked, but a
+  **Throttled.** While the user key (the account the username names, or
+  the name when none does: `Macaw.Auth.Native.Throttle.user_key/1`) or
+  the address waits, the password is not checked, but a
   hash's time is still spent (the hasher's `no_user_verify/0`), so a
   blocked attempt takes as long as a checked one and the response time
   doesn't tell a guesser when the block starts or ends. A throttled
   refusal is not counted; every checked refusal counts as a failure, and
-  a success resets the username's count.
+  a success resets the user key's count.
 
   Emits `[:macaw_auth, :native, :authenticate]` with `%{count: 1}` and
   `%{result: :ok | :error, reason: atom | nil, source: name | nil,
@@ -87,7 +90,7 @@ defmodule Macaw.Auth.Native do
     config = Config.get()
     username = text(credentials[:username])
     password = text(credentials[:password])
-    key = throttle_key(username)
+    key = Throttle.user_key(username)
     ip = address(Keyword.get(opts, :remote_ip))
     now = clock(opts)
 
@@ -114,16 +117,6 @@ defmodule Macaw.Auth.Native do
 
   defp text(value) when is_binary(value), do: value
   defp text(_), do: ""
-
-  # The username as the user table stores it, so `Alice` and `alice ` share
-  # a count; anything that can't be a username shares one key (it can never
-  # sign in, so nobody is slowed by sharing it).
-  defp throttle_key(username) do
-    case UserRecord.normalize_username(username) do
-      {:ok, name} -> name
-      {:error, :invalid_username} -> :invalid
-    end
-  end
 
   defp address(nil), do: nil
   defp address(ip) when is_binary(ip), do: ip
@@ -249,11 +242,11 @@ defmodule Macaw.Auth.Native do
   @spec recovery_codes_left(User.t() | term()) :: non_neg_integer()
   defdelegate recovery_codes_left(user), to: Totp
 
-  # A code check behind the throttle: refused unchecked while the user's
+  # A code check behind the throttle: refused unchecked while the account's
   # second-factor key or the address waits; a wrong code is a failure, an
-  # accepted one resets the user's key.
-  defp throttled(%User{username: username}, opts, check) do
-    key = {:second_factor, username}
+  # accepted one resets the account's second-factor key.
+  defp throttled(%User{id: id}, opts, check) do
+    key = {:second_factor, id}
     ip = address(Keyword.get(opts, :remote_ip))
     now = clock(opts)
 

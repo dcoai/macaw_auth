@@ -21,9 +21,9 @@ config :macaw_auth, Macaw.Auth.Native,
 ## 1. Signing in {#auth-native-authenticate}
 
 `Macaw.Auth.Native.authenticate/2` takes `%{username: _, password: _}` (a missing or non-string value counts as `""`) and options `:remote_ip` (a string or an address tuple, the client's) and `:now` (a `DateTime`, the throttle's clock). It:
-1. **asks the throttle** ([10](10-native-throttle.md)) whether the username or the address must wait; the username's key is the username normalized as the users table stores it ([06 §5](06-native-sources.md#auth-user-record)), or one shared key, `:invalid`, for anything that can't be a username;
+1. **asks the throttle** ([10](10-native-throttle.md)) whether the user key or the address must wait; the user key is the account the username names (normalized as the users table stores it, [06 §5](06-native-sources.md#auth-user-record)), by its id, else the normalized name when no account has it, or one shared key, `:invalid`, for anything that can't be a username ([10 §1](10-native-throttle.md#auth-throttle-keys));
 2. if not, **runs the source chain** ([06 §2](06-native-sources.md#auth-chain));
-3. on success, **resets the username's failure count** and returns the user (§3); on a refusal, **counts a failure** for the username and the address.
+3. on success, **resets the user key's failure count** and returns the user (§3); on a refusal, **counts a failure** for the user key and the address.
 
 ```test:native-authenticate
 a local user signs in as %Macaw.Auth.User{source: "local", second_factor: :none}, with the row's id, username, display name and roles

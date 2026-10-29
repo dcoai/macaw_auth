@@ -15,6 +15,12 @@ defmodule Macaw.Auth.Native.ThrottleTest do
   defp sign_in(username, password, ms, ip \\ "192.0.2.1"),
     do: Native.authenticate(%{username: username, password: password}, now: at(ms), remote_ip: ip)
 
+  # The user key the username's sign-in counts on: its account's, or the name's.
+  defp key(username), do: Throttle.user_key(username)
+
+  # The rows held for `key`, as `{key, failures, last}`.
+  defp row(key), do: Enum.filter(Throttle.rows(), &(elem(&1, 0) == key))
+
   defp fail_times(n, username, ms, ip \\ "192.0.2.1") do
     for _ <- 1..n,
         do: assert(sign_in(username, "wrong", ms, ip) == {:error, :invalid_credentials})
@@ -53,16 +59,17 @@ defmodule Macaw.Auth.Native.ThrottleTest do
 
     # A sixth checked failure after the wait: the next wait is two seconds, not more.
     assert sign_in("una", "wrong", 1_000) == {:error, :invalid_credentials}
-    assert Throttle.check("una", "192.0.2.1", ms(1_000)) == {:delay, 2_000}
+    assert Throttle.check(key("una"), "192.0.2.1", ms(1_000)) == {:delay, 2_000}
     assert {:ok, _} = sign_in("una", "correct horse battery", 3_000)
   end
 
   @tag verifies: "throttle-cap"
   test "the cap: the wait never exceeds 15 minutes" do
-    for _ <- 1..40, do: Throttle.failure("judy", nil, ms(0))
-    assert Throttle.check("judy", nil, ms(0)) == {:delay, @cap}
-    assert Throttle.check("judy", nil, ms(@cap - 1)) == {:delay, 1}
-    assert Throttle.check("judy", nil, ms(@cap)) == :ok
+    judy = {:name, "judy"}
+    for _ <- 1..40, do: Throttle.failure(judy, nil, ms(0))
+    assert Throttle.check(judy, nil, ms(0)) == {:delay, @cap}
+    assert Throttle.check(judy, nil, ms(@cap - 1)) == {:delay, 1}
+    assert Throttle.check(judy, nil, ms(@cap)) == :ok
   end
 
   @tag verifies: "throttle-success-resets-user"
@@ -129,7 +136,7 @@ defmodule Macaw.Auth.Native.ThrottleTest do
     for i <- 1..5,
         do: Macaw.Auth.Plug.authenticate(conn, %{username: "u#{i}", password: "x"}, now: at(0))
 
-    assert Throttle.check("quinn", "198.51.100.77", ms(0)) == {:delay, 1_000}
+    assert Throttle.check(key("quinn"), "198.51.100.77", ms(0)) == {:delay, 1_000}
   end
 
   @tag verifies: "native-telemetry-throttled"
@@ -182,7 +189,7 @@ defmodule Macaw.Auth.Native.ThrottleTest do
           {:error, :invalid_credentials} = sign_in("tess", "wrong", 0)
         end)
 
-      for _ <- 1..5, do: Throttle.failure("tess", nil, ms(0))
+      for _ <- 1..5, do: Throttle.failure(key("tess"), nil, ms(0))
       blocked = median(fn -> {:error, :throttled} = sign_in("tess", "wrong", 0) end)
 
       assert blocked < checked * 3 and checked < blocked * 3,
@@ -208,29 +215,34 @@ defmodule Macaw.Auth.Native.ThrottleTest do
     # latest failure's, in whatever order the failures arrive.
     @tag verifies: "throttle-failure-order"
     test "a failure that arrives second keeps the later time" do
-      for _ <- 1..5, do: Throttle.failure("yan", "192.0.2.4", ms(0))
-      Throttle.failure("yan", "192.0.2.4", ms(2_000))
-      Throttle.failure("yan", "192.0.2.4", ms(1_000))
+      yan = {:name, "yan"}
+      for _ <- 1..5, do: Throttle.failure(yan, "192.0.2.4", ms(0))
+      Throttle.failure(yan, "192.0.2.4", ms(2_000))
+      Throttle.failure(yan, "192.0.2.4", ms(1_000))
 
-      assert :ets.lookup(Throttle, {:user, "yan"}) == [{{:user, "yan"}, 7, ms(2_000)}]
-      assert :ets.lookup(Throttle, {:ip, "192.0.2.4"}) == [{{:ip, "192.0.2.4"}, 7, ms(2_000)}]
+      assert row({:user, yan}) == [{{:user, yan}, 7, ms(2_000)}]
+      assert row({:ip, "192.0.2.4"}) == [{{:ip, "192.0.2.4"}, 7, ms(2_000)}]
       # Seven failures wait 4 s from the latest, at 2 000, not from the one at 1 000.
-      assert Throttle.check("yan", "192.0.2.4", ms(5_999)) == {:delay, 1}
-      assert Throttle.check("yan", "192.0.2.4", ms(6_000)) == :ok
+      assert Throttle.check(yan, "192.0.2.4", ms(5_999)) == {:delay, 1}
+      assert Throttle.check(yan, "192.0.2.4", ms(6_000)) == :ok
     end
 
     @tag verifies: "throttle-failure-concurrent"
     test "concurrent failures each count, and the latest time stands" do
+      zed = {:name, "zed"}
       times = Enum.shuffle(1..400)
 
+      # The tasks share the test's sandboxed connection (their callers'), so
+      # here they take turns at it; the one statement is what makes each
+      # failure count on a database with concurrent writers too.
       times
-      |> Task.async_stream(&Throttle.failure("zed", "192.0.2.5", ms(&1)),
+      |> Task.async_stream(&Throttle.failure(zed, "192.0.2.5", ms(&1)),
         max_concurrency: System.schedulers_online() * 4
       )
       |> Stream.run()
 
-      assert :ets.lookup(Throttle, {:user, "zed"}) == [{{:user, "zed"}, 400, ms(400)}]
-      assert :ets.lookup(Throttle, {:ip, "192.0.2.5"}) == [{{:ip, "192.0.2.5"}, 400, ms(400)}]
+      assert row({:user, zed}) == [{{:user, zed}, 400, ms(400)}]
+      assert row({:ip, "192.0.2.5"}) == [{{:ip, "192.0.2.5"}, 400, ms(400)}]
     end
   end
 
@@ -238,27 +250,91 @@ defmodule Macaw.Auth.Native.ThrottleTest do
     @tag verifies: "throttle-sweep"
     test "forgets keys whose last failure is over a day old" do
       day = 24 * 60 * 60 * 1000
-      for _ <- 1..5, do: Throttle.failure("uma", "192.0.2.3", ms(0))
-      Throttle.failure("vic", nil, ms(day))
+      for _ <- 1..5, do: Throttle.failure({:name, "uma"}, "192.0.2.3", ms(0))
+      Throttle.failure({:name, "vic"}, nil, ms(day))
 
       assert Throttle.sweep(ms(day)) == 0
       assert Throttle.sweep(ms(day + 1)) == 2
-      assert Throttle.check("uma", "192.0.2.3", ms(day + 1)) == :ok
-      assert :ets.lookup(Throttle, {:user, "vic"}) != []
+      assert Throttle.check({:name, "uma"}, "192.0.2.3", ms(day + 1)) == :ok
+      assert Throttle.rows() == [{{:user, {:name, "vic"}}, 1, ms(day)}]
     end
 
     @tag verifies: "throttle-sweep-owner"
     test "the table's owner sweeps on its own" do
       old = Throttle.now() - 2 * 24 * 60 * 60 * 1000
-      Throttle.failure("wes", nil, old)
-      Throttle.failure("xan", nil, Throttle.now())
+      Throttle.failure({:name, "wes"}, nil, old)
+      Throttle.failure({:name, "xan"}, nil, Throttle.now())
 
+      # The owner sweeps through the test's sandboxed connection.
       owner = Process.whereis(Throttle)
+      Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), owner)
       send(owner, :sweep)
       :sys.get_state(owner)
 
-      assert :ets.lookup(Throttle, {:user, "wes"}) == []
-      assert [{_, 1, _}] = :ets.lookup(Throttle, {:user, "xan"})
+      assert [{{:user, {:name, "xan"}}, 1, _}] = Throttle.rows()
+    end
+  end
+
+  describe "kept in the database, per account" do
+    @tag verifies: "throttle-restart"
+    test "failures survive a restart of the throttle's process, on both keys" do
+      local_user!("nell", "correct horse battery")
+      fail_times(5, "nell", 0, "192.0.2.120")
+      before = Throttle.rows()
+
+      old = Process.whereis(Throttle)
+      :ok = Supervisor.terminate_child(Macaw.Auth.Supervisor, Throttle)
+      {:ok, new} = Supervisor.restart_child(Macaw.Auth.Supervisor, Throttle)
+      assert new != old
+
+      assert Throttle.rows() == before
+      # The account waits from another address, and the address for another name.
+      assert sign_in("nell", "correct horse battery", 999, "192.0.2.121") == {:error, :throttled}
+      assert sign_in("someone", "x", 999, "192.0.2.120") == {:error, :throttled}
+      assert {:ok, _} = sign_in("nell", "correct horse battery", 1_000, "192.0.2.121")
+    end
+
+    @tag verifies: "throttle-rename"
+    test "a renamed account keeps its count; its old name is then a name no account has" do
+      record = local_user!("nia", "correct horse battery")
+      fail_times(5, "nia", 0, nil)
+      record |> Ecto.Changeset.change(username: "nina") |> Repo.update!()
+
+      assert key("nina") == {:account, record.id}
+      assert sign_in("nina", "correct horse battery", 0, nil) == {:error, :throttled}
+
+      assert key("nia") == {:name, "nia"}
+      assert sign_in("nia", "correct horse battery", 0, nil) == {:error, :invalid_credentials}
+      assert {:ok, _} = sign_in("nina", "correct horse battery", 1_000, nil)
+    end
+
+    # The curve over n failures, for an account and for a name no account
+    # has: the same wait, and the same answer to the next attempt.
+    @tag verifies: "throttle-unknown-name"
+    test "an unknown name waits exactly as a known account does, failure for failure" do
+      local_user!("kay", "correct horse battery")
+      assert {:account, _} = key("kay")
+      assert key("ghost") == {:name, "ghost"}
+
+      waits =
+        [0, 0, 0, 0, 0, 1_000, 2_000, 4_000, 8_000, 16_000, 32_000] ++
+          [64_000, 128_000, 256_000, 512_000, @cap, @cap]
+
+      for {wait, n} <- Enum.with_index(waits) do
+        Throttle.reset()
+        for name <- ["kay", "ghost"], _ <- 1..n//1, do: Throttle.failure(key(name), nil, ms(0))
+
+        expected = if wait == 0, do: :ok, else: {:delay, wait}
+
+        assert Enum.map(["kay", "ghost"], &Throttle.check(key(&1), nil, ms(0))) == [
+                 expected,
+                 expected
+               ],
+               "#{n} failures"
+
+        answer = if wait == 0, do: {:error, :invalid_credentials}, else: {:error, :throttled}
+        assert Enum.map(["kay", "ghost"], &sign_in(&1, "wrong", 0, nil)) == [answer, answer]
+      end
     end
   end
 
@@ -268,7 +344,7 @@ defmodule Macaw.Auth.Native.ThrottleTest do
 
     @day 24 * 60 * 60 * 1000
 
-    defp rows, do: :ets.tab2list(Throttle) |> Enum.sort()
+    defp rows, do: Throttle.rows()
 
     @tag verifies: "auth-throttle"
     test "the values are constants, which no setting changes: five free, 2^(n-5) s, the cap, a day" do
@@ -282,14 +358,16 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       assert Throttle.delay_ms(5) == 1_000
       assert Throttle.delay_ms(40) == @cap
 
-      Throttle.failure("ava", "192.0.2.60", ms(0))
+      Throttle.failure({:name, "ava"}, "192.0.2.60", ms(0))
       assert Throttle.sweep(ms(@day)) == 0
       assert Throttle.sweep(ms(@day + 1)) == 2
     end
 
     @tag verifies: "auth-throttle-keys"
-    test "the keys: the normalized username or :invalid, the address as a string; the longer wait wins" do
-      for name <- ["Bea ", "not a name!", "@@"],
+    test "the keys: the account, else the normalized name, or :invalid; the address as a string; the longer wait wins" do
+      amy = local_user!("amy", "correct horse battery")
+
+      for name <- ["Bea ", "not a name!", "@@", " AMY"],
           do:
             Native.authenticate(%{username: name, password: "x"},
               now: at(0),
@@ -297,22 +375,27 @@ defmodule Macaw.Auth.Native.ThrottleTest do
             )
 
       assert rows() == [
-               {{:ip, "192.0.2.70"}, 3, ms(0)},
+               {{:ip, "192.0.2.70"}, 4, ms(0)},
                {{:user, :invalid}, 2, ms(0)},
-               {{:user, "bea"}, 1, ms(0)}
+               {{:user, {:account, amy.id}}, 1, ms(0)},
+               {{:user, {:name, "bea"}}, 1, ms(0)}
              ]
 
+      assert key(" Amy") == {:account, amy.id}
+      assert key("BEA") == {:name, "bea"}
+      assert key("not a name!") == :invalid
+
       # check/3: the longer of the two keys' waits.
-      for _ <- 1..6, do: Throttle.failure("cal", nil, ms(0))
-      for _ <- 1..5, do: Throttle.failure("other", "192.0.2.71", ms(0))
-      assert Throttle.check("cal", "192.0.2.71", ms(0)) == {:delay, 2_000}
-      assert Throttle.check("dee", "192.0.2.71", ms(0)) == {:delay, 1_000}
-      assert Throttle.check("dee", "192.0.2.72", ms(0)) == :ok
+      for _ <- 1..6, do: Throttle.failure({:name, "cal"}, nil, ms(0))
+      for _ <- 1..5, do: Throttle.failure({:name, "other"}, "192.0.2.71", ms(0))
+      assert Throttle.check({:name, "cal"}, "192.0.2.71", ms(0)) == {:delay, 2_000}
+      assert Throttle.check({:name, "dee"}, "192.0.2.71", ms(0)) == {:delay, 1_000}
+      assert Throttle.check({:name, "dee"}, "192.0.2.72", ms(0)) == :ok
 
       # failure/3 counts on both keys.
       Throttle.reset()
-      assert Throttle.failure("dee", "192.0.2.72", ms(5)) == :ok
-      assert rows() == [{{:ip, "192.0.2.72"}, 1, ms(5)}, {{:user, "dee"}, 1, ms(5)}]
+      assert Throttle.failure({:name, "dee"}, "192.0.2.72", ms(5)) == :ok
+      assert rows() == [{{:ip, "192.0.2.72"}, 1, ms(5)}, {{:user, {:name, "dee"}}, 1, ms(5)}]
 
       # now/0 is the system clock in milliseconds.
       before = System.system_time(:millisecond)
@@ -323,7 +406,7 @@ defmodule Macaw.Auth.Native.ThrottleTest do
     @tag verifies: "auth-throttle-backoff"
     test "nothing is locked for good: at the cap, the right password succeeds once the wait passed" do
       local_user!("eli", "correct horse battery")
-      for _ <- 1..40, do: Throttle.failure("eli", "192.0.2.1", ms(0))
+      for _ <- 1..40, do: Throttle.failure(key("eli"), "192.0.2.1", ms(0))
 
       assert sign_in("eli", "correct horse battery", @cap - 1) == {:error, :throttled}
       assert {:ok, _} = sign_in("eli", "correct horse battery", @cap)
@@ -331,20 +414,20 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       # From the key's last failure, and another checked failure doubles the wait.
       fail_times(5, "fay", 0, "192.0.2.80")
       assert sign_in("fay", "wrong", 1_000, "192.0.2.80") == {:error, :invalid_credentials}
-      assert Throttle.check("fay", "192.0.2.80", ms(1_000)) == {:delay, 2_000}
+      assert Throttle.check(key("fay"), "192.0.2.80", ms(1_000)) == {:delay, 2_000}
     end
 
     @tag verifies: "auth-throttle-reset"
-    test "success/1 forgets the username's key and only it; a sign-in resets the normalized name" do
-      Throttle.failure("gus", "192.0.2.90", ms(0))
-      assert Throttle.success("gus") == :ok
+    test "success/1 forgets the user key and only it; a sign-in resets its account's" do
+      Throttle.failure({:name, "gus"}, "192.0.2.90", ms(0))
+      assert Throttle.success({:name, "gus"}) == :ok
       assert rows() == [{{:ip, "192.0.2.90"}, 1, ms(0)}]
 
-      local_user!("gus", "correct horse battery")
-      Throttle.failure("gus", "192.0.2.91", ms(0))
+      gus = local_user!("gus", "correct horse battery")
+      Throttle.failure({:account, gus.id}, "192.0.2.91", ms(0))
       assert {:ok, _} = sign_in(" GUS", "correct horse battery", 0, "192.0.2.91")
-      assert :ets.lookup(Throttle, {:user, "gus"}) == []
-      assert [{_, 1, _}] = :ets.lookup(Throttle, {:ip, "192.0.2.91"})
+      assert row({:user, {:account, gus.id}}) == []
+      assert [{_, 1, _}] = row({:ip, "192.0.2.91"})
     end
 
     @tag verifies: "auth-throttle-second-factor"
@@ -365,16 +448,17 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       opts = [now: t0, remote_ip: "192.0.2.95"]
       assert Native.enroll_confirm(user, "000001", opts) == {:error, :invalid_code}
 
-      assert :ets.lookup(Throttle, {:user, {:second_factor, "hal"}}) == [
-               {{:user, {:second_factor, "hal"}}, 1, DateTime.to_unix(t0, :millisecond)}
+      # The account's own second-factor key, by its id.
+      assert row({:user, {:second_factor, user.id}}) == [
+               {{:user, {:second_factor, user.id}}, 1, DateTime.to_unix(t0, :millisecond)}
              ]
 
-      assert :ets.lookup(Throttle, {:user, "hal"}) == []
+      assert row({:user, {:account, user.id}}) == []
 
-      # An accepted code resets the user's second-factor key, never the address.
+      # An accepted code resets the account's second-factor key, never the address.
       assert {:ok, _codes} = Native.enroll_confirm(user, Totp.code(secret, t0), opts)
-      assert :ets.lookup(Throttle, {:user, {:second_factor, "hal"}}) == []
-      assert [{_, 1, _}] = :ets.lookup(Throttle, {:ip, "192.0.2.95"})
+      assert row({:user, {:second_factor, user.id}}) == []
+      assert [{_, 1, _}] = row({:ip, "192.0.2.95"})
 
       # Code failures from an address slow sign-ins from it.
       user = UserRecord |> Repo.get!(user.id) |> Native.to_user()
@@ -422,8 +506,8 @@ defmodule Macaw.Auth.Native.ThrottleTest do
       refute_received {:hasher, _}
 
       # Blocked by the username alone (another address), then by the address alone.
-      for _ <- 1..5, do: Throttle.failure("ida", nil, ms(0))
-      for _ <- 1..5, do: Throttle.failure("someone", "192.0.2.101", ms(0))
+      for _ <- 1..5, do: Throttle.failure(key("ida"), nil, ms(0))
+      for _ <- 1..5, do: Throttle.failure({:name, "someone"}, "192.0.2.101", ms(0))
 
       for {name, ip} <- [{"ida", "192.0.2.102"}, {"jon", "192.0.2.101"}] do
         flush_hasher()
@@ -434,41 +518,53 @@ defmodule Macaw.Auth.Native.ThrottleTest do
     end
 
     @tag verifies: "auth-throttle-table"
-    test "a named public table the application's throttle owns, rows {key, failures, last}, reset, and the owner's options" do
+    test "rows of macaw_auth_throttle in the configured repo, {key, failures, last}, reset, and the sweep's owner and its options" do
       owner = Process.whereis(Throttle)
 
       assert {Throttle, ^owner, :worker, _} =
                List.keyfind(Supervisor.which_children(Macaw.Auth.Supervisor), Throttle, 0)
 
-      assert :ets.info(Throttle, :owner) == owner
-      assert :ets.info(Throttle, :named_table)
-      assert :ets.info(Throttle, :protection) == :public
+      Throttle.failure({:name, "kai"}, "192.0.2.110", ms(7))
+      assert rows() == [{{:ip, "192.0.2.110"}, 1, ms(7)}, {{:user, {:name, "kai"}}, 1, ms(7)}]
 
-      Throttle.failure("kai", nil, ms(7))
-      assert rows() == [{{:user, "kai"}, 1, ms(7)}]
+      # The repo's rows, in the columns ThrottleRecord encodes a key in.
+      assert Repo.query!(
+               "SELECT kind, subject, failures, last_failure_ms FROM macaw_auth_throttle ORDER BY kind"
+             ).rows == [["address", "192.0.2.110", 1, ms(7)], ["name", "kai", 1, ms(7)]]
+
       assert Throttle.reset() == :ok
       assert rows() == []
 
       # The owner's :sweep_every_ms and :clock: a throttle started with them
-      # sweeps on its own, at its clock's time.
+      # sweeps on its own, at its clock's time. Its first clock read waits
+      # until the test has let it use the sandboxed connection.
       test = self()
       :ok = Supervisor.terminate_child(Macaw.Auth.Supervisor, Throttle)
       on_exit(fn -> {:ok, _} = Supervisor.restart_child(Macaw.Auth.Supervisor, Throttle) end)
+      Throttle.failure({:name, "lou"}, nil, ms(0))
+      Throttle.failure({:name, "max"}, nil, ms(2 * @day))
 
       {:ok, pid} =
         Throttle.start_link(
           sweep_every_ms: 10,
           clock: fn ->
-            send(test, :clock_read)
+            send(test, {:clock_read, self()})
+
+            unless Process.get(:allowed) do
+              receive do
+                :allowed -> Process.put(:allowed, true)
+              end
+            end
+
             ms(2 * @day)
           end
         )
 
-      Throttle.failure("lou", nil, ms(0))
-      Throttle.failure("max", nil, ms(2 * @day))
-      assert_receive :clock_read
+      assert_receive {:clock_read, ^pid}
+      Ecto.Adapters.SQL.Sandbox.allow(Repo, self(), pid)
+      send(pid, :allowed)
       :sys.get_state(pid)
-      assert rows() == [{{:user, "max"}, 1, ms(2 * @day)}]
+      assert rows() == [{{:user, {:name, "max"}}, 1, ms(2 * @day)}]
       :ok = GenServer.stop(pid)
     end
   end

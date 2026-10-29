@@ -71,12 +71,14 @@ defmodule Macaw.Auth.NativeTest do
       assert_received {:hasher, :verify}
       assert Native.authenticate(%{username: "bea"}) == {:error, :invalid_credentials}
 
-      # A refusal counts a failure for the username, normalized, and the address,
-      # a tuple as its string.
+      # A refusal counts a failure for the account the username names, normalized,
+      # and the address, a tuple as its string.
       Throttle.reset()
       for _ <- 1..5, do: sign_in(" BEA", "wrong", now: at(0), remote_ip: {192, 0, 2, 7})
-      assert Throttle.check("bea", nil, ms(0)) == {:delay, 1_000}
-      assert Throttle.check("someone", "192.0.2.7", ms(0)) == {:delay, 1_000}
+      bea = Throttle.user_key("bea")
+      assert {:account, _} = bea
+      assert Throttle.check(bea, nil, ms(0)) == {:delay, 1_000}
+      assert Throttle.check({:name, "someone"}, "192.0.2.7", ms(0)) == {:delay, 1_000}
 
       # Anything that can't be a username shares one key.
       Throttle.reset()
@@ -90,9 +92,9 @@ defmodule Macaw.Auth.NativeTest do
       assert {:ok, %User{username: "bea"}} =
                sign_in("bea", "correct horse battery", now: at(0), remote_ip: "198.51.100.3")
 
-      assert Throttle.check("bea", nil, ms(0)) == :ok
+      assert Throttle.check(bea, nil, ms(0)) == :ok
       sign_in("other", "wrong", now: at(0), remote_ip: "198.51.100.3")
-      assert Throttle.check("x", "198.51.100.3", ms(0)) == {:delay, 1_000}
+      assert Throttle.check({:name, "x"}, "198.51.100.3", ms(0)) == {:delay, 1_000}
     end
 
     @tag verifies: "auth-native-refusal"
@@ -131,8 +133,8 @@ defmodule Macaw.Auth.NativeTest do
       end
 
       # Still five failures: the wait is the fifth's, one second.
-      assert Throttle.check("dee", nil, ms(999)) == {:delay, 1}
-      assert Throttle.check("dee", nil, ms(1_000)) == :ok
+      assert Throttle.check(Throttle.user_key("dee"), nil, ms(999)) == {:delay, 1}
+      assert Throttle.check(Throttle.user_key("dee"), nil, ms(1_000)) == :ok
     end
 
     @tag verifies: "auth-native-telemetry"

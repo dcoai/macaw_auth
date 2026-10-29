@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
   use Macaw.Auth.DataCase, async: false
 
-  alias Macaw.Auth.Native.{RecoveryCodeRecord, SessionRecord, UserRecord}
+  alias Macaw.Auth.Native.{RecoveryCodeRecord, SessionRecord, ThrottleRecord, UserRecord}
   alias Mix.Tasks.MacawAuth.Gen.Migration
 
   setup do
@@ -18,20 +18,23 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
   end
 
   @tag verifies: "migrations-write"
-  test "writes the three migrations, in order, naming the repo", %{dir: dir} do
-    [users, sessions, factor] =
+  test "writes the four migrations, in order, naming the repo", %{dir: dir} do
+    [users, sessions, factor, throttle] =
       Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
 
     assert Path.basename(users) =~ ~r/^\d{14}_create_macaw_auth_users\.exs$/
     assert Path.basename(sessions) =~ ~r/^\d{14}_create_macaw_auth_sessions\.exs$/
     assert Path.basename(factor) =~ ~r/^\d{14}_add_macaw_auth_second_factor\.exs$/
+    assert Path.basename(throttle) =~ ~r/^\d{14}_create_macaw_auth_throttle\.exs$/
     assert Path.basename(users) < Path.basename(sessions)
     assert Path.basename(sessions) < Path.basename(factor)
+    assert Path.basename(factor) < Path.basename(throttle)
     assert File.read!(users) =~ "defmodule MyApp.Repo.Migrations.CreateMacawAuthUsers do"
     assert File.read!(sessions) =~ "defmodule MyApp.Repo.Migrations.CreateMacawAuthSessions do"
     assert File.read!(factor) =~ "defmodule MyApp.Repo.Migrations.AddMacawAuthSecondFactor do"
+    assert File.read!(throttle) =~ "defmodule MyApp.Repo.Migrations.CreateMacawAuthThrottle do"
 
-    for path <- [users, sessions, factor],
+    for path <- [users, sessions, factor, throttle],
         do: assert_received({:mix_shell, :info, ["* creating " <> ^path]})
   end
 
@@ -43,33 +46,43 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
       Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
     end
 
-    assert length(File.ls!(dir)) == 3
+    assert length(File.ls!(dir)) == 4
   end
 
   @tag verifies: "migrations-only-missing"
   test "a host with some of the migrations gets only the others", %{dir: dir} do
-    [users, first, second] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
-    File.rm!(first)
-    File.rm!(second)
+    [users | rest] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+    Enum.each(rest, &File.rm!/1)
 
-    assert [sessions, factor] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+    assert [sessions, factor, throttle] =
+             Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+
     assert Path.basename(sessions) =~ ~r/_create_macaw_auth_sessions\.exs$/
     assert Path.basename(factor) =~ ~r/_add_macaw_auth_second_factor\.exs$/
+    assert Path.basename(throttle) =~ ~r/_create_macaw_auth_throttle\.exs$/
     assert Path.wildcard(Path.join(dir, "*_create_macaw_auth_users.exs")) == [users]
 
-    # With the users and sessions migrations, only the second factor's.
+    # With the users and sessions migrations, the second factor's and the throttle's.
     File.rm!(factor)
+    File.rm!(throttle)
 
-    assert [again] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+    assert [again, throttle] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
     assert Path.basename(again) =~ ~r/_add_macaw_auth_second_factor\.exs$/
     assert Path.basename(again) > Path.basename(sessions)
     assert Path.wildcard(Path.join(dir, "*_create_macaw_auth_users.exs")) == [users]
     assert Path.wildcard(Path.join(dir, "*_create_macaw_auth_sessions.exs")) == [sessions]
+
+    # A host that has the three earlier ones gets only the throttle's, after them.
+    File.rm!(throttle)
+
+    assert [only] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+    assert Path.basename(only) =~ ~r/_create_macaw_auth_throttle\.exs$/
+    assert Path.basename(only) > Path.basename(again)
   end
 
   @tag verifies: "migrations-configured-repo"
   test "takes the configured repo when none is given", %{dir: dir} do
-    [users, sessions, _factor] = Migration.run(["--migrations-path", dir])
+    [users, sessions, _factor, _throttle] = Migration.run(["--migrations-path", dir])
 
     assert File.read!(users) =~
              "defmodule Macaw.Auth.Test.Repo.Migrations.CreateMacawAuthUsers do"
@@ -89,7 +102,7 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
       |> Migration.run()
       |> Enum.map(&seconds/1)
 
-    assert versions == Enum.map(1..3, &(DateTime.to_unix(ahead) + &1))
+    assert versions == Enum.map(1..4, &(DateTime.to_unix(ahead) + &1))
   end
 
   defp version(%DateTime{} = at), do: Calendar.strftime(at, "%Y%m%d%H%M%S")
@@ -148,6 +161,16 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
              Repo.query!(
                "SELECT \"table\", on_delete FROM pragma_foreign_key_list('macaw_auth_recovery_codes')"
              ).rows
+
+    assert columns("macaw_auth_throttle") == Enum.sort(~w(kind subject failures last_failure_ms))
+    assert unique_index?("macaw_auth_throttle", "kind_subject")
+    refute unique_index?("macaw_auth_throttle", "last_failure_ms")
+
+    assert Repo.query!(
+             "SELECT 1 FROM pragma_index_list('macaw_auth_throttle') WHERE name LIKE '%last_failure_ms%'"
+           ).rows == [[1]]
+
+    assert Repo.query!("SELECT 1 FROM pragma_foreign_key_list('macaw_auth_throttle')").rows == []
   end
 
   # Each section's own text, beside the hints inside it.
@@ -178,8 +201,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
       File.mkdir_p!(dir)
 
       written = File.cd!(dir, fn -> Migration.run(["--repo", "MyApp.Repo"]) end)
-      assert length(written) == 3
-      assert length(File.ls!(Path.join(dir, "priv/repo/migrations"))) == 3
+      assert length(written) == 4
+      assert length(File.ls!(Path.join(dir, "priv/repo/migrations"))) == 4
 
       assert_raise Mix.Error, ~r/unknown option: .*--frob/, fn ->
         Migration.run(["--frob", "--migrations-path", Path.join(dir, "other")])
@@ -221,18 +244,23 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
 
       assert column("macaw_auth_sessions", "second_factor_passed") == [[1, "true"]]
       not_null.("macaw_auth_recovery_codes", ~w(user_id code_hash))
+      not_null.("macaw_auth_throttle", ~w(kind subject failures last_failure_ms))
 
       assert Repo.query!(
                "SELECT 1 FROM pragma_index_list('macaw_auth_sessions') WHERE name LIKE '%user_id%'"
              ).rows == [[1]]
 
       # The arrays are {:array, :string}: JSON text here, a list again when read.
-      [users, sessions, _] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+      [users, sessions, _, throttle] =
+        Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+
       assert File.read!(users) =~ "add :roles, {:array, :string}, null: false"
       assert File.read!(sessions) =~ "add :completed_steps, {:array, :string}, null: false"
+      # Milliseconds of the system clock outgrow a 32-bit integer.
+      assert File.read!(throttle) =~ "add :last_failure_ms, :bigint, null: false"
 
       # Each table is its schema's, column for column.
-      for schema <- [UserRecord, SessionRecord, RecoveryCodeRecord] do
+      for schema <- [UserRecord, SessionRecord, RecoveryCodeRecord, ThrottleRecord] do
         fields = Enum.map(schema.__schema__(:fields), &Atom.to_string/1)
         assert Enum.sort(fields) == columns(schema.__schema__(:source)), inspect(schema)
       end
@@ -245,20 +273,21 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
     end
 
     @tag verifies: "auth-migrations-missing"
-    test "any *_<name>.exs counts as present; the refusal names the three", %{dir: dir} do
+    test "any *_<name>.exs counts as present; the refusal names the four", %{dir: dir} do
       File.mkdir_p!(dir)
       File.write!(Path.join(dir, "hosts_create_macaw_auth_users.exs"), "")
 
-      assert [sessions, factor] =
+      assert [sessions, factor, throttle] =
                Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
 
       assert sessions =~ "_create_macaw_auth_sessions.exs"
       assert factor =~ "_add_macaw_auth_second_factor.exs"
+      assert throttle =~ "_create_macaw_auth_throttle.exs"
 
       assert_raise Mix.Error,
                    "#{dir} already has the macaw_auth migrations " <>
                      "(create_macaw_auth_users, create_macaw_auth_sessions, " <>
-                     "add_macaw_auth_second_factor)",
+                     "add_macaw_auth_second_factor, create_macaw_auth_throttle)",
                    fn -> Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir]) end
     end
 
@@ -270,21 +299,25 @@ defmodule Mix.Tasks.MacawAuth.Gen.MigrationTest do
       File.write!(Path.join(dir, "20991399000000_not_a_version.exs"), "")
 
       before = DateTime.to_unix(DateTime.utc_now())
-      [first, second, third] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+
+      [first, second, third, fourth] =
+        Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+
       later = DateTime.to_unix(DateTime.utc_now())
 
       assert seconds(first) in before..later
       assert seconds(second) == seconds(first) + 1
       assert seconds(third) == seconds(first) + 2
+      assert seconds(fourth) == seconds(first) + 3
 
       # A second run within the same moment still runs after what is there.
-      File.rm!(second)
-      File.rm!(third)
+      Enum.each([second, third, fourth], &File.rm!/1)
       before = DateTime.to_unix(DateTime.utc_now())
-      [again, last] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
+      [again, next, last] = Migration.run(["--repo", "MyApp.Repo", "--migrations-path", dir])
       later = DateTime.to_unix(DateTime.utc_now())
       assert seconds(again) in max(seconds(first) + 1, before)..max(seconds(first) + 1, later)
-      assert seconds(last) == seconds(again) + 1
+      assert seconds(next) == seconds(again) + 1
+      assert seconds(last) == seconds(again) + 2
     end
   end
 end

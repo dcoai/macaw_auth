@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.MacawAuth.Gen.Migration do
-  @shortdoc "Writes the migrations for the native backend's tables (users, sessions, second factor)"
+  @shortdoc "Writes the migrations for the native backend's tables (users, sessions, second factor, throttle)"
 
   @moduledoc """
   Writes the migrations that create the native backend's tables into the
@@ -11,7 +11,9 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
     (`Macaw.Auth.Native.SessionRecord`), referencing the users;
   - `add_macaw_auth_second_factor`: the second factor's columns on
     `macaw_auth_users` and the `macaw_auth_recovery_codes` table
-    (`Macaw.Auth.Native.Totp`, `Macaw.Auth.Native.RecoveryCodeRecord`).
+    (`Macaw.Auth.Native.Totp`, `Macaw.Auth.Native.RecoveryCodeRecord`);
+  - `create_macaw_auth_throttle`: `macaw_auth_throttle`
+    (`Macaw.Auth.Native.ThrottleRecord`), the sign-in throttle's counts.
 
       mix macaw_auth.gen.migration
       mix macaw_auth.gen.migration --repo MyApp.Repo --migrations-path priv/repo/migrations
@@ -22,7 +24,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
 
   Each has its own file, and the task writes only those not yet there: a
   host that has the users and sessions migrations gets the second
-  factor's added after them, and a host that has all three is refused, so
+  factor's and the throttle's added after them, and a host that has all
+  four is refused, so
   no table or column is ever created twice. Files are timestamped like `mix ecto.gen.migration`'s,
   one second apart, so they run in order.
 
@@ -39,7 +42,8 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
   @migrations [
     {"create_macaw_auth_users", :users},
     {"create_macaw_auth_sessions", :sessions},
-    {"add_macaw_auth_second_factor", :second_factor}
+    {"add_macaw_auth_second_factor", :second_factor},
+    {"create_macaw_auth_throttle", :throttle}
   ]
 
   @impl true
@@ -226,6 +230,36 @@ defmodule Mix.Tasks.MacawAuth.Gen.Migration do
         end
 
         create unique_index(:macaw_auth_recovery_codes, [:user_id, :code_hash])
+      end
+    end
+    """
+  end
+
+  def migration(:throttle, repo) do
+    """
+    defmodule #{repo}.Migrations.CreateMacawAuthThrottle do
+      # Written by `mix macaw_auth.gen.migration`: the sign-in throttle's
+      # failure counts (Macaw.Auth.Native.ThrottleRecord), kept here so a
+      # restart forgets none of them. A row is one key: an account (by id,
+      # so a rename keeps its count), a name no account has, or a client
+      # address.
+      use Ecto.Migration
+
+      def change do
+        create table(:macaw_auth_throttle, primary_key: false) do
+          # "account", "second_factor", "name", "invalid" or "address".
+          add :kind, :string, null: false
+          # The account's id, the name, the address, or "" for "invalid".
+          add :subject, :string, null: false
+          add :failures, :integer, null: false
+          # The latest failure's time, in milliseconds of the system clock.
+          add :last_failure_ms, :bigint, null: false
+        end
+
+        # A check, a failure's upsert and a success each find their rows by it.
+        create unique_index(:macaw_auth_throttle, [:kind, :subject])
+        # The sweep deletes by age.
+        create index(:macaw_auth_throttle, [:last_failure_ms])
       end
     end
     """
